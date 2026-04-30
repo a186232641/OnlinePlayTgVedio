@@ -1,7 +1,14 @@
 name: tgvideo
 
-# Local-build compose. For production, prefer docker-compose.prod.yml which
-# pulls images from GHCR.
+# Production compose: pulls pre-built images from ghcr.io (built by the
+# `build-and-publish` GitHub Actions workflow). No local build context.
+#
+# Set these in `.env` next to this file (or pass --env-file):
+#   IMAGE_OWNER     repo owner (lowercase), e.g. a186232641
+#   IMAGE_TAG       image tag, e.g. latest, main, sha-1a2b3c4 (default: latest)
+#   DOMAIN          Caddy site address (real domain ⇒ Let's Encrypt; localhost ⇒ self-signed)
+#   POSTGRES_*      database credentials
+#   TG_API_ID / TG_API_HASH / JWT_SECRET / MASTER_KEY / CACHE_CAP_GB
 
 services:
   postgres:
@@ -18,20 +25,17 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
-    ports:
-      - "127.0.0.1:5432:5432"
 
   server:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.server
+    image: ghcr.io/${IMAGE_OWNER}/onlineplaytgvedio-server:${IMAGE_TAG:-latest}
+    pull_policy: always
     restart: unless-stopped
     environment:
       SERVER_ADDR: ":8080"
       DOMAIN: ${DOMAIN}
       TG_API_ID: ${TG_API_ID}
       TG_API_HASH: ${TG_API_HASH}
-      DB_DSN: ${DB_DSN}
+      DB_DSN: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
       JWT_SECRET: ${JWT_SECRET}
       MASTER_KEY: ${MASTER_KEY}
       CACHE_DIR: /var/cache/tgvideo
@@ -43,9 +47,8 @@ services:
       - tgcache:/var/cache/tgvideo
 
   caddy:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.web
+    image: ghcr.io/${IMAGE_OWNER}/onlineplaytgvedio-web:${IMAGE_TAG:-latest}
+    pull_policy: always
     restart: unless-stopped
     ports:
       - "80:80"

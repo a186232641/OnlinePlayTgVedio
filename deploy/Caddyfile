@@ -1,26 +1,17 @@
-{
-	# global options
-	auto_https off
-}
-
-{$DOMAIN} {
+# {$DOMAIN} drives auto-HTTPS:
+#   - real domain (e.g. tgvideo.example.com) → Let's Encrypt cert
+#   - "localhost" (default) → Caddy's internal self-signed cert
+{$DOMAIN:localhost} {
 	encode gzip
 
-	# API + streaming go to backend
-	@api path /api/*
+	# API + streaming + health → backend
+	@api path /api/* /healthz
 	reverse_proxy @api server:8080 {
-		# preserve Range headers and large bodies
+		# don't buffer; preserve Range / streaming
 		flush_interval -1
-		transport http {
-			read_buffer 64KB
-			write_buffer 64KB
-		}
 	}
 
-	@health path /healthz
-	reverse_proxy @health server:8080
-
-	# SPA: try real file, otherwise fall back to index.html
+	# Static SPA: try real file, fall back to index.html for client-side routing
 	root * /srv/web
 	try_files {path} /index.html
 	file_server

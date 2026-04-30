@@ -42,13 +42,31 @@ cd web && npm install && npm run dev
 
 打开 http://localhost:5173,注册账号 → 绑定 TG 账号 → 等待索引完成。
 
-## 生产部署(docker compose)
+## 生产部署 — 拉取 GHCR 预构建镜像
+
+每次推送到 `main`,GitHub Actions(`.github/workflows/build-and-publish.yml`)会:
+1. 多架构构建后端 → `ghcr.io/<owner>/onlineplaytgvedio-server`
+2. 多架构构建前端(Caddy + 烘焙好的 React 产物) → `ghcr.io/<owner>/onlineplaytgvedio-web`
+3. 推送 `latest` / 分支名 / `sha-xxx` / 版本 tag
+
+服务器上只需:
 
 ```bash
+# 1. 配置 .env
 cp .env.example .env
 # 必填:TG_API_ID, TG_API_HASH, JWT_SECRET, MASTER_KEY,
-# 改 POSTGRES_PASSWORD 和 DOMAIN(用于 Caddy)
-docker compose -f deploy/docker-compose.yml --env-file .env --profile build up -d --build
+# POSTGRES_PASSWORD;DOMAIN 设成真实域名 → Caddy 自动签 Let's Encrypt
+
+# 2. 拉取 + 启动
+make prod-up
+# 或:
+docker compose -f deploy/docker-compose.prod.yml --env-file .env pull
+docker compose -f deploy/docker-compose.prod.yml --env-file .env up -d
+```
+
+如需本地从源码构建(无需 GHCR):
+```bash
+docker compose -f deploy/docker-compose.yml --env-file .env up -d --build
 ```
 
 服务:

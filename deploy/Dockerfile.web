@@ -1,11 +1,13 @@
-FROM node:20-alpine AS build
+# Stage 1: build the React SPA
+FROM node:20-alpine AS spa
 WORKDIR /web
-COPY web/package.json web/package-lock.json* web/pnpm-lock.yaml* web/yarn.lock* ./
-RUN if [ -f pnpm-lock.yaml ]; then npm i -g pnpm && pnpm install --frozen-lockfile; \
-    elif [ -f yarn.lock ]; then yarn install --frozen-lockfile; \
-    else npm ci || npm install; fi
-COPY web/ .
+COPY web/package.json web/package-lock.json* ./
+RUN npm ci
+COPY web/ ./
 RUN npm run build
 
-FROM caddy:2-alpine AS caddy
-# placeholder for COPY in compose
+# Stage 2: Caddy serving the SPA + reverse-proxying /api -> server:8080
+FROM caddy:2-alpine
+COPY deploy/Caddyfile /etc/caddy/Caddyfile
+COPY --from=spa /web/dist /srv/web
+EXPOSE 80 443
