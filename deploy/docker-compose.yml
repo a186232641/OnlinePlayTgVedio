@@ -1,0 +1,73 @@
+name: tgvideo
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    restart: unless-stopped
+    environment:
+      SERVER_ADDR: ":8080"
+      DOMAIN: ${DOMAIN}
+      TG_API_ID: ${TG_API_ID}
+      TG_API_HASH: ${TG_API_HASH}
+      DB_DSN: ${DB_DSN}
+      JWT_SECRET: ${JWT_SECRET}
+      MASTER_KEY: ${MASTER_KEY}
+      CACHE_DIR: /var/cache/tgvideo
+      CACHE_CAP_GB: ${CACHE_CAP_GB}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - tgcache:/var/cache/tgvideo
+
+  web-build:
+    image: node:20-alpine
+    working_dir: /web
+    volumes:
+      - ../web:/web
+      - webdist:/web/dist
+    command: sh -c "if [ -d node_modules ]; then echo 'using existing node_modules'; else npm install; fi && npm run build"
+    profiles: ["build"]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - webdist:/srv/web:ro
+      - tgcache:/var/cache/tgvideo:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    depends_on:
+      - server
+
+volumes:
+  pgdata:
+  tgcache:
+  webdist:
+  caddydata:
+  caddyconfig:

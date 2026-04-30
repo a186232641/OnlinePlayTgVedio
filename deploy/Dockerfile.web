@@ -1,0 +1,11 @@
+FROM node:20-alpine AS build
+WORKDIR /web
+COPY web/package.json web/package-lock.json* web/pnpm-lock.yaml* web/yarn.lock* ./
+RUN if [ -f pnpm-lock.yaml ]; then npm i -g pnpm && pnpm install --frozen-lockfile; \
+    elif [ -f yarn.lock ]; then yarn install --frozen-lockfile; \
+    else npm ci || npm install; fi
+COPY web/ .
+RUN npm run build
+
+FROM caddy:2-alpine AS caddy
+# placeholder for COPY in compose

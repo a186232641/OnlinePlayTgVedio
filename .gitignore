@@ -1,0 +1,11 @@
+.env
+.env.local
+*.log
+/bin/
+/tmp/
+/web/dist/
+/web/node_modules/
+/.idea/
+/data/
+*.test
+*.out

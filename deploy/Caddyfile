@@ -1,0 +1,27 @@
+{
+	# global options
+	auto_https off
+}
+
+{$DOMAIN} {
+	encode gzip
+
+	# API + streaming go to backend
+	@api path /api/*
+	reverse_proxy @api server:8080 {
+		# preserve Range headers and large bodies
+		flush_interval -1
+		transport http {
+			read_buffer 64KB
+			write_buffer 64KB
+		}
+	}
+
+	@health path /healthz
+	reverse_proxy @health server:8080
+
+	# SPA: try real file, otherwise fall back to index.html
+	root * /srv/web
+	try_files {path} /index.html
+	file_server
+}
