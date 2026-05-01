@@ -1,0 +1,22 @@
+.git
+.github
+.idea
+.env
+.env.*
+!.env.example
+
+# never copy host node_modules / dist into the build context — they have
+# host-arch native binaries (esbuild etc.) that break Linux container builds
+web/node_modules
+web/dist
+web/.cache
+
+# go build artifacts
+bin/
+*.test
+*.out
+
+# editor
+*.swp
+*.swo
+.DS_Store

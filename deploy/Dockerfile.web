@@ -4,7 +4,10 @@ WORKDIR /web
 COPY web/package.json web/package-lock.json* ./
 RUN npm ci
 COPY web/ ./
-RUN npm run build
+# .dockerignore strips host node_modules/dist, but be defensive
+RUN rm -rf node_modules && npm ci && npm run build
+# Sanity check: fail the build loudly if the SPA didn't produce assets
+RUN ls /web/dist/assets/*.js >/dev/null && ls /web/dist/assets/*.css >/dev/null
 
 # Stage 2: Caddy serving the SPA + reverse-proxying /api -> server:8080
 FROM caddy:2-alpine

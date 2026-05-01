@@ -4,15 +4,24 @@
 {$DOMAIN:localhost} {
 	encode gzip
 
+	# Long-cache hashed asset bundles
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+
 	# API + streaming + health → backend
-	@api path /api/* /healthz
-	reverse_proxy @api server:8080 {
-		# don't buffer; preserve Range / streaming
-		flush_interval -1
+	handle /api/* {
+		reverse_proxy server:8080 {
+			flush_interval -1
+		}
+	}
+	handle /healthz {
+		reverse_proxy server:8080
 	}
 
-	# Static SPA: try real file, fall back to index.html for client-side routing
-	root * /srv/web
-	try_files {path} /index.html
-	file_server
+	# Everything else: SPA static files with index.html fallback
+	handle {
+		root * /srv/web
+		try_files {path} /index.html
+		file_server
+	}
 }
