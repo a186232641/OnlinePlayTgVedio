@@ -5,8 +5,11 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/server
 
-FROM gcr.io/distroless/static-debian12:nonroot
+# distroless static (no shell). Stay on root: docker volumes default to
+# root-owned, and we need write access to /var/cache/tgvideo. Distroless has
+# no userland to chown at startup, so running as root inside this minimal
+# image is the pragmatic trade-off (no shell = no escape surface).
+FROM gcr.io/distroless/static-debian12:latest
 COPY --from=build /out/server /server
 EXPOSE 8080
-USER nonroot:nonroot
 ENTRYPOINT ["/server"]

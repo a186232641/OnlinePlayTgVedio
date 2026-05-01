@@ -2,6 +2,9 @@ package db
 
 import (
 	"context"
+	"errors"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func (d *DB) AddFavorite(ctx context.Context, userID, videoID int64) error {
@@ -21,11 +24,10 @@ func (d *DB) IsFavorite(ctx context.Context, userID, videoID int64) (bool, error
 	var n int
 	err := d.QueryRow(ctx, `SELECT 1 FROM favorites WHERE user_id=$1 AND video_id=$2`, userID, videoID).Scan(&n)
 	if err != nil {
-		if err.Error() == "no rows in result set" {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return false, nil
 		}
-		// pgx returns pgx.ErrNoRows; check loosely
-		return false, nil
+		return false, err
 	}
 	return true, nil
 }
