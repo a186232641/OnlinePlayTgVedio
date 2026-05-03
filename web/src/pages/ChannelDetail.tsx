@@ -1,6 +1,6 @@
 import { useParams } from "react-router-dom";
 import { useInfiniteQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef } from "react";
+import { useMemo } from "react";
 
 import { api, Video } from "../api/client";
 import { VideoGrid } from "../components/VideoGrid";
@@ -11,7 +11,6 @@ const PAGE_SIZE = 200;
 
 export function ChannelDetail() {
   const { id } = useParams();
-  const sentinelRef = useRef<HTMLDivElement | null>(null);
 
   const q = useInfiniteQuery<Page>({
     queryKey: ["channel", id, "videos"],
@@ -24,10 +23,8 @@ export function ChannelDetail() {
       return api.get<Page>(`/api/channels/${id}/videos?${qs}`);
     },
     getNextPageParam: (last) => {
-      // Last fetched page returned a full batch → there might be more.
       if (last.videos.length < PAGE_SIZE) return undefined;
-      const tail = last.videos[last.videos.length - 1];
-      return tail?.id;
+      return last.videos[last.videos.length - 1]?.id;
     },
   });
 
@@ -37,33 +34,26 @@ export function ChannelDetail() {
   );
   const total = q.data?.pages[0]?.total;
 
-  // Auto-load when sentinel comes into view (infinite scroll).
-  useEffect(() => {
-    const el = sentinelRef.current;
-    if (!el) return;
-    const obs = new IntersectionObserver((entries) => {
-      if (entries[0].isIntersecting && q.hasNextPage && !q.isFetchingNextPage) {
-        q.fetchNextPage();
-      }
-    }, { rootMargin: "400px" });
-    obs.observe(el);
-    return () => obs.disconnect();
-  }, [q.hasNextPage, q.isFetchingNextPage, q.fetchNextPage]);
-
   if (q.isLoading) return <div className="p-6 text-slate-400">加载中…</div>;
 
   return (
-    <div className="space-y-2">
+    <div>
       <div className="px-6 pt-4 text-xs text-slate-500">
         {total != null ? <>已加载 {all.length} / {total}</> : <>已加载 {all.length} 条</>}
       </div>
       <VideoGrid videos={all} />
-      <div ref={sentinelRef} className="h-12 flex items-center justify-center text-xs text-slate-500">
-        {q.isFetchingNextPage
-          ? "加载中…"
-          : q.hasNextPage
-          ? <button onClick={() => q.fetchNextPage()} className="px-4 py-1.5 bg-slate-800 hover:bg-slate-700 rounded">加载更多</button>
-          : all.length > 0 ? "已加载全部" : null}
+      <div className="py-6 flex items-center justify-center">
+        {q.hasNextPage ? (
+          <button
+            onClick={() => q.fetchNextPage()}
+            disabled={q.isFetchingNextPage}
+            className="px-6 py-2 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 rounded text-sm"
+          >
+            {q.isFetchingNextPage ? "加载中…" : `加载下一页 (+${PAGE_SIZE})`}
+          </button>
+        ) : all.length > 0 ? (
+          <span className="text-xs text-slate-500">— 已加载全部 {all.length} 条 —</span>
+        ) : null}
       </div>
     </div>
   );

@@ -80,7 +80,15 @@ func (h *VideosHandlers) Search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	vids, err := h.DB.SearchVideos(r.Context(), uid, q, limit)
+	offsetID, _ := strconv.ParseInt(r.URL.Query().Get("offset_id"), 10, 64)
+	channelID, _ := strconv.ParseInt(r.URL.Query().Get("channel_id"), 10, 64)
+	vids, err := h.DB.SearchVideos(r.Context(), db.SearchVideosOpts{
+		UserID:    uid,
+		Query:     q,
+		ChannelID: channelID,
+		Limit:     limit,
+		OffsetID:  offsetID,
+	})
 	if err != nil {
 		httpx.WriteError(w, err)
 		return

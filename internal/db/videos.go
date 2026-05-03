@@ -167,20 +167,43 @@ func (d *DB) VideoByID(ctx context.Context, id, userID int64) (*Video, error) {
 	return v, nil
 }
 
-func (d *DB) SearchVideos(ctx context.Context, userID int64, query string, limit int) ([]Video, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 60
+type SearchVideosOpts struct {
+	UserID    int64
+	Query     string
+	ChannelID int64 // 0 = all channels
+	Limit     int
+	OffsetID  int64
+}
+
+// SearchVideos uses ILIKE on caption — Postgres' built-in to_tsvector('simple')
+// is whitespace-tokenized, which fails for Chinese text where words aren't
+// space-separated. ILIKE with a per-row scan is slower than FTS but works for
+// any language without extra dependencies. For 100k+ rows add a pg_trgm index
+// later if it gets sluggish.
+func (d *DB) SearchVideos(ctx context.Context, opt SearchVideosOpts) ([]Video, error) {
+	if opt.Limit <= 0 || opt.Limit > 500 {
+		opt.Limit = 200
 	}
-	rows, err := d.Query(ctx, `
-        SELECT id, user_id, channel_id, tg_message_id, tg_doc_id, access_hash, file_reference,
-               COALESCE(mime,''), size_bytes, duration_sec, width, height,
-               COALESCE(caption,''), sent_at, COALESCE(thumb_path,'')
-        FROM videos
-        WHERE user_id=$1 AND caption_tsv @@ plainto_tsquery('simple', $2)
-        ORDER BY ts_rank(caption_tsv, plainto_tsquery('simple', $2)) DESC,
-                 sent_at DESC NULLS LAST
-        LIMIT $3
-    `, userID, query, limit)
+	args := []any{opt.UserID, "%" + opt.Query + "%"}
+	where := []string{"v.user_id=$1", "v.caption ILIKE $2"}
+	if opt.ChannelID != 0 {
+		args = append(args, opt.ChannelID)
+		where = append(where, "v.channel_id=$"+itoa(len(args)))
+	}
+	if opt.OffsetID > 0 {
+		args = append(args, opt.OffsetID)
+		where = append(where, "v.id < $"+itoa(len(args)))
+	}
+	args = append(args, opt.Limit)
+	q := `
+        SELECT v.id, v.user_id, v.channel_id, v.tg_message_id, v.tg_doc_id, v.access_hash,
+               v.file_reference, COALESCE(v.mime,''), v.size_bytes, v.duration_sec,
+               v.width, v.height, COALESCE(v.caption,''), v.sent_at, COALESCE(v.thumb_path,'')
+        FROM videos v
+        WHERE ` + joinWhere(where) + `
+        ORDER BY v.sent_at DESC NULLS LAST, v.id DESC
+        LIMIT $` + itoa(len(args))
+	rows, err := d.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
