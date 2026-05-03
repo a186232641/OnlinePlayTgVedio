@@ -59,13 +59,24 @@ export function Player() {
           onError={async (e) => {
             const code = (e.currentTarget.error?.code ?? 0);
             setMediaErr(MEDIA_ERR_LABEL[code] ?? `未知(code=${code})`);
-            // Try to fetch the stream URL directly to surface backend error body.
             try {
               const r = await fetch(v.stream_url, { credentials: "include" });
-              if (!r.ok) {
-                const body = await r.text();
-                setStreamDiag(`HTTP ${r.status} ${r.statusText}\n${body.slice(0, 400)}`);
-              }
+              const ct = r.headers.get("content-type") ?? "(none)";
+              const cl = r.headers.get("content-length") ?? "(none)";
+              const cr = r.headers.get("content-range") ?? "(none)";
+              const ab = await r.arrayBuffer();
+              const head = Array.from(new Uint8Array(ab.slice(0, 16)))
+                .map((b) => b.toString(16).padStart(2, "0"))
+                .join(" ");
+              const ascii = new TextDecoder("utf-8", { fatal: false })
+                .decode(ab.slice(0, 200));
+              setStreamDiag(
+                `HTTP ${r.status} ${r.statusText}\n` +
+                `Content-Type: ${ct}\nContent-Length: ${cl}\nContent-Range: ${cr}\n` +
+                `Body bytes: ${ab.byteLength}\n` +
+                `First 16 bytes (hex): ${head}\n` +
+                `First 200 bytes (text): ${ascii}`,
+              );
             } catch (err: any) {
               setStreamDiag(`fetch failed: ${err.message ?? err}`);
             }
