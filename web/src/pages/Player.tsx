@@ -1,6 +1,7 @@
 import { useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import mpegts from "mpegts.js";
 
 import { api, Video } from "../api/client";
 
@@ -10,7 +11,7 @@ const MEDIA_ERR_LABEL: Record<number, string> = {
   1: "ABORTED 用户取消加载",
   2: "NETWORK 网络层错误(后端 502/503/连接断开)",
   3: "DECODE 解码失败(浏览器不支持该编码,如 H.265)",
-  4: "SRC_NOT_SUPPORTED 服务端返回不能识别为视频(可能是 JSON 错误响应)",
+  4: "SRC_NOT_SUPPORTED 服务端返回不能识别为视频",
 };
 
 export function Player() {
@@ -18,15 +19,109 @@ export function Player() {
   const qc = useQueryClient();
   const [mediaErr, setMediaErr] = useState<string | null>(null);
   const [streamDiag, setStreamDiag] = useState<string | null>(null);
+  const [containerHint, setContainerHint] = useState<string>("");
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const flvPlayerRef = useRef<mpegts.Player | null>(null);
 
-  // Reset error state when video changes
-  useEffect(() => { setMediaErr(null); setStreamDiag(null); }, [id]);
+  useEffect(() => {
+    setMediaErr(null);
+    setStreamDiag(null);
+    setContainerHint("");
+  }, [id]);
 
   const q = useQuery<VideoResp>({
     queryKey: ["video", id],
     queryFn: () => api.get(`/api/videos/${id}`),
     enabled: !!id,
   });
+
+  // Set up the player based on container detection. Many TG-stored videos
+  // have mime_type=video/mp4 in the JSON but the actual bytes are FLV
+  // (browser can't decode natively). Probe first 16 bytes, then either
+  // attach the URL directly to <video> (for real mp4) or hand it to mpegts.js.
+  useEffect(() => {
+    const video = videoRef.current;
+    const url = q.data?.video.stream_url;
+    if (!video || !url) return;
+
+    let cancelled = false;
+    setMediaErr(null);
+    setStreamDiag(null);
+
+    (async () => {
+      let kind: "flv" | "native" = "native";
+      let hint = "";
+      try {
+        const r = await fetch(url, {
+          headers: { Range: "bytes=0-15" },
+          credentials: "include",
+        });
+        if (r.ok) {
+          const ab = await r.arrayBuffer();
+          const b = new Uint8Array(ab);
+          if (b.length >= 3 && b[0] === 0x46 && b[1] === 0x4c && b[2] === 0x56) {
+            kind = "flv";
+            hint = "FLV container — using mpegts.js";
+          } else if (b.length >= 8 && b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70) {
+            hint = "MP4 (ftyp box) — native";
+          } else {
+            hint = "未识别的容器,尝试 native";
+          }
+        }
+      } catch {
+        // probe failed, fall back to native
+      }
+      if (cancelled) return;
+      setContainerHint(hint);
+
+      if (kind === "flv") {
+        if (!mpegts.getFeatureList().mseLivePlayback) {
+          setMediaErr("浏览器不支持 MSE — FLV 视频无法播放");
+          return;
+        }
+        const player = mpegts.createPlayer({
+          type: "flv",
+          url,
+          isLive: false,
+          cors: true,
+          withCredentials: true,
+        });
+        player.attachMediaElement(video);
+        player.on(mpegts.Events.ERROR, (errType, errDetail, errInfo) => {
+          setMediaErr(`mpegts ${errType}: ${errDetail}`);
+          setStreamDiag(JSON.stringify(errInfo));
+        });
+        player.load();
+        flvPlayerRef.current = player;
+        try {
+          // Some browsers block autoplay; ignore rejection.
+          await player.play();
+        } catch {
+          /* user can press play manually */
+        }
+      } else {
+        video.src = url;
+        try {
+          await video.play();
+        } catch {
+          /* autoplay blocked, no-op */
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (flvPlayerRef.current) {
+        try { flvPlayerRef.current.destroy(); } catch { /* noop */ }
+        flvPlayerRef.current = null;
+      }
+      try {
+        video.pause();
+        video.removeAttribute("src");
+        video.load();
+      } catch { /* noop */ }
+    };
+  }, [q.data?.video.stream_url]);
 
   const fav = useMutation({
     mutationFn: async () => {
@@ -46,16 +141,13 @@ export function Player() {
 
   return (
     <div className="flex flex-col">
-      {/* 全宽黑色播放区,视频 max-w-full + max-h-85vh 自动按比例缩放,
-          竖屏视频左右加黑边,横屏视频上下加黑边。 */}
       <div className="bg-black w-full flex items-center justify-center min-h-[40vh] relative">
         <video
           key={v.id}
+          ref={videoRef}
           controls
-          autoPlay
           preload="metadata"
           className="max-w-full max-h-[85vh] outline-none"
-          src={v.stream_url}
           onError={async (e) => {
             const code = (e.currentTarget.error?.code ?? 0);
             setMediaErr(MEDIA_ERR_LABEL[code] ?? `未知(code=${code})`);
@@ -68,14 +160,10 @@ export function Player() {
               const head = Array.from(new Uint8Array(ab.slice(0, 16)))
                 .map((b) => b.toString(16).padStart(2, "0"))
                 .join(" ");
-              const ascii = new TextDecoder("utf-8", { fatal: false })
-                .decode(ab.slice(0, 200));
               setStreamDiag(
                 `HTTP ${r.status} ${r.statusText}\n` +
                 `Content-Type: ${ct}\nContent-Length: ${cl}\nContent-Range: ${cr}\n` +
-                `Body bytes: ${ab.byteLength}\n` +
-                `First 16 bytes (hex): ${head}\n` +
-                `First 200 bytes (text): ${ascii}`,
+                `Body bytes: ${ab.byteLength}\nFirst 16 bytes (hex): ${head}`,
               );
             } catch (err: any) {
               setStreamDiag(`fetch failed: ${err.message ?? err}`);
@@ -112,6 +200,7 @@ export function Player() {
           {v.mime_type && <span>{v.mime_type}</span>}
           {v.date && <span>{v.date.slice(0, 19).replace("T", " ")}</span>}
           {v.from && <span>from: {v.from}</span>}
+          {containerHint && <span className="text-emerald-500">{containerHint}</span>}
         </div>
       </div>
     </div>
