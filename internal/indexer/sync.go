@@ -99,6 +99,10 @@ func (i *Indexer) runSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
 	maxSeen, _ := i.db.MaxTGMsgID(ctx, ch.ID, ch.UserID)
 	slog.Info("sync start", "channel_id", ch.ID, "title", ch.Title, "max_seen", maxSeen)
 
+	const progressEvery = 500 // log a progress line every N messages walked
+	walked := 0
+	lastTickAt := time.Now()
+
 	stopErr := errors.New("done")
 	err = query.Messages(api).GetHistory(peer).BatchSize(100).
 		ForEach(ctx, func(_ context.Context, e messages.Elem) error {
@@ -112,12 +116,25 @@ func (i *Indexer) runSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
 			v := videoFromTGMessage(ch, msg)
 			if v == nil {
 				st.update(func(s *SyncState) { s.Skipped++ })
-				return nil
+			} else {
+				if _, err := i.db.UpsertVideo(ctx, v); err != nil {
+					return fmt.Errorf("upsert msg=%d: %w", msg.ID, err)
+				}
+				st.update(func(s *SyncState) { s.Imported++ })
 			}
-			if _, err := i.db.UpsertVideo(ctx, v); err != nil {
-				return fmt.Errorf("upsert msg=%d: %w", msg.ID, err)
+			walked++
+			if walked%progressEvery == 0 {
+				snap := st.snapshot()
+				slog.Info("sync progress",
+					"channel_id", ch.ID,
+					"walked", walked,
+					"imported", snap.Imported,
+					"skipped", snap.Skipped,
+					"current_msg_id", msg.ID,
+					"page_dur_ms", time.Since(lastTickAt).Milliseconds(),
+				)
+				lastTickAt = time.Now()
 			}
-			st.update(func(s *SyncState) { s.Imported++ })
 			return nil
 		})
 
