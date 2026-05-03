@@ -22,8 +22,11 @@ import (
 )
 
 const (
-	chunkAlign = 4096
-	maxChunk   = 1024 * 1024 // 1 MiB — Telegram's per-call limit
+	// Telegram's upload.getFile requires `offset % limit == 0`. We always
+	// fetch in 1 MiB blocks aligned to 1 MiB boundaries — simplifies the
+	// loop and avoids LIMIT_INVALID when the user seeks to an offset that's
+	// 4 KiB-aligned but not 1 MiB-aligned.
+	chunkSize = 1024 * 1024 // 1 MiB
 	// maxStream caps the unknown-size path. Bigger than any real video; used
 	// as a sentinel "stream until TG returns empty (EOF)".
 	maxStream = 1 << 60
@@ -162,24 +165,17 @@ func (s *StreamServer) serveFromTelegram(w http.ResponseWriter, r *http.Request,
 }
 
 // streamRange reads [start, end] from Telegram and writes it to dst.
-// It handles 4KB alignment (asks the server for chunks aligned down) and
-// trims leading/trailing bytes before writing.
+// Telegram requires offset to be divisible by limit; we always request
+// 1 MiB blocks aligned to 1 MiB boundaries, then trim the leading
+// (cursor - alignedOffset) bytes off the first chunk and tail bytes off
+// the last so the caller sees exactly the bytes they asked for.
 func (s *StreamServer) streamRange(ctx context.Context, api *tg.Client, v *db.Video, start, end int64, dst io.Writer) error {
-	// First chunk offset must align down to chunkAlign for Telegram.
 	cursor := start
 	refreshed := false
 
 	for cursor <= end {
-		alignedOffset := cursor - (cursor % chunkAlign)
+		alignedOffset := cursor - (cursor % chunkSize)
 		prefixSkip := cursor - alignedOffset
-		// Compute the limit (4KB-aligned, never exceeding maxChunk).
-		want := end - alignedOffset + 1
-		if want > maxChunk {
-			want = maxChunk
-		}
-		if want%chunkAlign != 0 {
-			want += chunkAlign - (want % chunkAlign)
-		}
 
 		req := &tg.UploadGetFileRequest{
 			Precise: true,
@@ -189,12 +185,12 @@ func (s *StreamServer) streamRange(ctx context.Context, api *tg.Client, v *db.Vi
 				FileReference: v.FileReference,
 			},
 			Offset: alignedOffset,
-			Limit:  int(want),
+			Limit:  chunkSize,
 		}
 		resp, err := api.UploadGetFile(ctx, req)
 		if err != nil {
 			slog.Warn("upload.getFile failed",
-				"video_id", v.ID, "offset", alignedOffset, "limit", want, "err", err)
+				"video_id", v.ID, "offset", alignedOffset, "limit", chunkSize, "err", err)
 			if !refreshed && tgerr.Is(err, "FILE_REFERENCE_EXPIRED") {
 				refreshed = true
 				if rerr := RefreshFileReference(ctx, s.DB, s.TG, v); rerr == nil {
@@ -214,9 +210,6 @@ func (s *StreamServer) streamRange(ctx context.Context, api *tg.Client, v *db.Vi
 		}
 		data := uf.Bytes
 		if cursor == start && len(data) >= 8 {
-			// On the first chunk, log the magic bytes so we can confirm it
-			// looks like a valid mp4 (00 00 00 ?? 66 74 79 70 'ftyp') vs
-			// some other container or random garbage.
 			slog.Info("stream first-chunk header",
 				"video_id", v.ID,
 				"chunk_size", len(data),
@@ -226,7 +219,7 @@ func (s *StreamServer) streamRange(ctx context.Context, api *tg.Client, v *db.Vi
 		}
 		if len(data) == 0 {
 			slog.Info("stream EOF (empty chunk)", "video_id", v.ID, "cursor", cursor)
-			break // EOF.
+			break
 		}
 		// Trim front (alignment skip) and back (range tail).
 		if int64(len(data)) > prefixSkip {
@@ -234,7 +227,6 @@ func (s *StreamServer) streamRange(ctx context.Context, api *tg.Client, v *db.Vi
 		} else {
 			data = nil
 		}
-		// Tail trim: don't write past `end`.
 		want64 := end - cursor + 1
 		if int64(len(data)) > want64 {
 			data = data[:want64]
@@ -246,7 +238,7 @@ func (s *StreamServer) streamRange(ctx context.Context, api *tg.Client, v *db.Vi
 			cursor += int64(len(data))
 		}
 		// Telegram returned fewer bytes than requested → EOF reached.
-		if int64(len(uf.Bytes)) < int64(want) {
+		if int64(len(uf.Bytes)) < int64(chunkSize) {
 			break
 		}
 	}
