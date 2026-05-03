@@ -75,8 +75,9 @@ func (h *VideosHandlers) Thumb(w http.ResponseWriter, r *http.Request) {
 
 // Search supports any subset of these query params:
 //
-//	text         ILIKE %text% on `text` column
-//	file_name    ILIKE %file_name% on `file_name` column
+//	q            ILIKE %q% on (file_name OR text) — single-box search
+//	text         ILIKE %text% on `text` column   (advanced AND)
+//	file_name    ILIKE %file_name% on `file_name` column (advanced AND)
 //	date_from    YYYY-MM-DD,inclusive lower bound
 //	date_to      YYYY-MM-DD,inclusive upper bound (treated as end-of-day)
 //	channel_id   restrict to one channel
@@ -84,16 +85,13 @@ func (h *VideosHandlers) Thumb(w http.ResponseWriter, r *http.Request) {
 func (h *VideosHandlers) Search(w http.ResponseWriter, r *http.Request) {
 	uid, _ := web.UserIDFromContext(r.Context())
 	qv := r.URL.Query()
+	q := strings.TrimSpace(qv.Get("q"))
 	text := strings.TrimSpace(qv.Get("text"))
-	if text == "" {
-		// backwards-compat: ?q= used to mean text
-		text = strings.TrimSpace(qv.Get("q"))
-	}
 	fileName := strings.TrimSpace(qv.Get("file_name"))
 	dateFrom := parseDateOnly(qv.Get("date_from"), false)
 	dateTo := parseDateOnly(qv.Get("date_to"), true)
 
-	if text == "" && fileName == "" && dateFrom == nil && dateTo == nil {
+	if q == "" && text == "" && fileName == "" && dateFrom == nil && dateTo == nil {
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{"videos": []videoDTO{}})
 		return
 	}
@@ -104,6 +102,7 @@ func (h *VideosHandlers) Search(w http.ResponseWriter, r *http.Request) {
 
 	vids, err := h.DB.SearchVideos(r.Context(), db.SearchVideosOpts{
 		UserID:    uid,
+		Q:         q,
 		Text:      text,
 		FileName:  fileName,
 		DateFrom:  dateFrom,

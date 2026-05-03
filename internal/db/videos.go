@@ -228,10 +228,12 @@ func (d *DB) VideoByID(ctx context.Context, id, userID int64) (*Video, error) {
 	return v, nil
 }
 
-// SearchVideosOpts: any subset of (Text, FileName, DateFrom, DateTo) can be
-// supplied. Empty fields are ignored. ChannelID > 0 narrows to one channel.
+// SearchVideosOpts: any subset of fields can be supplied. Empty are ignored.
+// Q is a "match-either" shortcut that ORs `file_name` and `text`. Text /
+// FileName are AND'd in addition (used by the advanced /search page).
 type SearchVideosOpts struct {
 	UserID    int64
+	Q         string // OR-match on (file_name, text)
 	Text      string // ILIKE on `text`
 	FileName  string // ILIKE on `file_name`
 	DateFrom  *time.Time
@@ -247,6 +249,11 @@ func (d *DB) SearchVideos(ctx context.Context, opt SearchVideosOpts) ([]Video, e
 	}
 	args := []any{opt.UserID}
 	where := []string{"v.user_id=$1"}
+	if opt.Q != "" {
+		args = append(args, "%"+opt.Q+"%")
+		i := itoa(len(args))
+		where = append(where, "(v.file_name ILIKE $"+i+" OR v.text ILIKE $"+i+")")
+	}
 	if opt.Text != "" {
 		args = append(args, "%"+opt.Text+"%")
 		where = append(where, "v.text ILIKE $"+itoa(len(args)))
