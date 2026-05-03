@@ -33,6 +33,19 @@ type entry struct {
 	stop   bg.StopFunc
 }
 
+// waiterClient adapts (*telegram.Client + *floodwait.Waiter) to bg.Client so
+// the waiter is running for the full lifetime of the underlying client.
+type waiterClient struct {
+	client *telegram.Client
+	waiter *floodwait.Waiter
+}
+
+func (w waiterClient) Run(ctx context.Context, f func(ctx context.Context) error) error {
+	return w.waiter.Run(ctx, func(ctx context.Context) error {
+		return w.client.Run(ctx, f)
+	})
+}
+
 // Client bundles the high-level + low-level handles a caller needs.
 type Client struct {
 	Telegram *telegram.Client
@@ -83,7 +96,10 @@ func (m *Manager) Start(ctx context.Context, userID int64) error {
 		},
 	})
 
-	stop, err := bg.Connect(client)
+	// floodwait.Waiter only processes rate-limit retries while waiter.Run is
+	// active. bg.Connect runs whatever Client interface we hand it, so we
+	// hand it a wrapper that nests client.Run inside waiter.Run.
+	stop, err := bg.Connect(waiterClient{client: client, waiter: waiter})
 	if err != nil {
 		return fmt.Errorf("bg.Connect: %w", err)
 	}

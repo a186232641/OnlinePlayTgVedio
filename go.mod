@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/gotd/contrib v0.21.1
 	github.com/gotd/td v0.143.0
 	github.com/jackc/pgx/v5 v5.9.2
 	golang.org/x/crypto v0.50.0
@@ -22,7 +23,6 @@ require (
 	github.com/go-faster/xor v1.0.0 // indirect
 	github.com/go-faster/yaml v0.4.6 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/gotd/contrib v0.21.1 // indirect
 	github.com/gotd/ige v0.2.2 // indirect
 	github.com/gotd/neo v0.1.5 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
