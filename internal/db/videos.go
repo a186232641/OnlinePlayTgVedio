@@ -78,18 +78,29 @@ func (d *DB) UpdateVideoThumb(ctx context.Context, id int64, path string) error 
 	return err
 }
 
+func (d *DB) CountVideosByChannel(ctx context.Context, userID, channelID int64) (int64, error) {
+	row := d.QueryRow(ctx, `SELECT count(*) FROM videos WHERE user_id=$1 AND channel_id=$2`, userID, channelID)
+	var n int64
+	if err := row.Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 type ListVideosOpts struct {
-	UserID     int64
-	ChannelID  int64 // 0 = all
-	Limit      int
-	OffsetID   int64 // pagination by id (descending)
-	OrderBy    string // "sent_at" (default) | "duration"
-	FavOnly    bool
+	UserID    int64
+	ChannelID int64 // 0 = all
+	Limit     int
+	// OffsetID is a keyset cursor — pass the smallest video.id from the
+	// previous page; we return rows with id strictly less. 0 = first page.
+	OffsetID int64
+	OrderBy  string // "sent_at" (default) | "duration"
+	FavOnly  bool
 }
 
 func (d *DB) ListVideos(ctx context.Context, opt ListVideosOpts) ([]Video, error) {
-	if opt.Limit <= 0 || opt.Limit > 200 {
-		opt.Limit = 60
+	if opt.Limit <= 0 || opt.Limit > 500 {
+		opt.Limit = 200
 	}
 	q := `
         SELECT v.id, v.user_id, v.channel_id, v.tg_message_id, v.tg_doc_id, v.access_hash,
@@ -101,7 +112,11 @@ func (d *DB) ListVideos(ctx context.Context, opt ListVideosOpts) ([]Video, error
 	where := []string{"v.user_id=$1"}
 	if opt.ChannelID != 0 {
 		args = append(args, opt.ChannelID)
-		where = append(where, "v.channel_id=$2")
+		where = append(where, "v.channel_id=$"+itoa(len(args)))
+	}
+	if opt.OffsetID > 0 {
+		args = append(args, opt.OffsetID)
+		where = append(where, "v.id < $"+itoa(len(args)))
 	}
 	if opt.FavOnly {
 		q += ` JOIN favorites f ON f.video_id=v.id AND f.user_id=v.user_id `

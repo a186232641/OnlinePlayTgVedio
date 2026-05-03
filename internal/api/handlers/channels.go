@@ -113,11 +113,13 @@ func (h *ChannelsHandlers) ChannelVideos(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offsetID, _ := strconv.ParseInt(r.URL.Query().Get("offset_id"), 10, 64)
 	order := r.URL.Query().Get("order")
 	vids, err := h.DB.ListVideos(r.Context(), db.ListVideosOpts{
 		UserID:    uid,
 		ChannelID: cid,
 		Limit:     limit,
+		OffsetID:  offsetID,
 		OrderBy:   order,
 	})
 	if err != nil {
@@ -128,5 +130,12 @@ func (h *ChannelsHandlers) ChannelVideos(w http.ResponseWriter, r *http.Request)
 	for _, v := range vids {
 		out = append(out, videoToDTO(v))
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"videos": out})
+	resp := map[string]any{"videos": out}
+	// total only on first page (cheap on followups too but pointless to recompute)
+	if offsetID == 0 {
+		if total, err := h.DB.CountVideosByChannel(r.Context(), uid, cid); err == nil {
+			resp["total"] = total
+		}
+	}
+	httpx.WriteJSON(w, http.StatusOK, resp)
 }
