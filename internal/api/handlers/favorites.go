@@ -24,10 +24,12 @@ type favReq struct {
 func (h *FavoritesHandlers) List(w http.ResponseWriter, r *http.Request) {
 	uid, _ := web.UserIDFromContext(r.Context())
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offsetID, _ := strconv.ParseInt(r.URL.Query().Get("offset_id"), 10, 64)
 	vids, err := h.DB.ListVideos(r.Context(), db.ListVideosOpts{
-		UserID:  uid,
-		Limit:   limit,
-		FavOnly: true,
+		UserID:   uid,
+		Limit:    limit,
+		OffsetID: offsetID,
+		FavOnly:  true,
 	})
 	if err != nil {
 		httpx.WriteError(w, err)
