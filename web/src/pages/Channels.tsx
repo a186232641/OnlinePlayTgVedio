@@ -30,10 +30,14 @@ export function Channels() {
   }
 
   const channels = all.data?.channels ?? [];
-  const enabled = channels.filter((c) => c.index_enabled && c.dialog_kind !== "forum");
+  // A channel is browsable if it has any videos cached (from indexer or
+  // JSON import) OR the index toggle is on (so "刚开启,还没扫到"也能看到状态).
+  const browsable = channels.filter(
+    (c) => c.dialog_kind !== "forum" && (c.video_count > 0 || c.index_enabled),
+  );
   const forums = channels.filter((c) => c.dialog_kind === "forum");
 
-  if (enabled.length === 0 && forums.length === 0) {
+  if (browsable.length === 0 && forums.length === 0) {
     return (
       <div className="p-6 text-slate-400 space-y-2">
         <div>还没有可浏览的频道。</div>
@@ -68,11 +72,11 @@ export function Channels() {
         </section>
       )}
 
-      {enabled.length > 0 && (
+      {browsable.length > 0 && (
         <section>
-          <h2 className="text-sm uppercase text-slate-500 tracking-wide mb-3">已索引</h2>
+          <h2 className="text-sm uppercase text-slate-500 tracking-wide mb-3">频道</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {enabled.map((c) => (
+            {browsable.map((c) => (
               <Link key={c.id} to={`/channels/${c.id}`}
                     className="p-4 rounded bg-slate-900 border border-slate-800 hover:border-emerald-700">
                 <div className="font-medium truncate">{c.title}</div>
@@ -80,6 +84,9 @@ export function Channels() {
                 <div className="text-xs mt-2 text-slate-500 flex items-center gap-2">
                   <span>{c.video_count} 视频</span>
                   {c.dialog_kind === "topic" && <span className="text-purple-300">话题</span>}
+                  {!c.index_enabled && c.video_count > 0 && (
+                    <span className="text-sky-300" title="通过 JSON 导入或一次性 live-fetch 缓存">已缓存</span>
+                  )}
                   {c.index_status === "running" && <span className="text-amber-300">索引中…</span>}
                 </div>
               </Link>
