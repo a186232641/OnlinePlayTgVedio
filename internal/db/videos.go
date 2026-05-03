@@ -152,6 +152,21 @@ func (d *DB) UpdateVideoLocator(ctx context.Context, id int64, tgDocID, accessHa
 	return err
 }
 
+// MaxTGMsgID returns the largest tg_msg_id stored for a channel — used by the
+// TG sync to skip messages we've already imported and only fetch newer ones.
+// Returns 0 when the channel is empty.
+func (d *DB) MaxTGMsgID(ctx context.Context, channelID, userID int64) (int64, error) {
+	row := d.QueryRow(ctx, `
+        SELECT COALESCE(MAX(tg_msg_id), 0) FROM videos
+        WHERE channel_id=$1 AND user_id=$2
+    `, channelID, userID)
+	var n int64
+	if err := row.Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 func (d *DB) CountVideosByChannel(ctx context.Context, userID, channelID int64) (int64, error) {
 	row := d.QueryRow(ctx, `SELECT count(*) FROM videos WHERE user_id=$1 AND channel_id=$2`, userID, channelID)
 	var n int64

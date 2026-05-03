@@ -9,10 +9,12 @@ import (
 	"github.com/hanfeilong/onlineplaytgvideo/internal/auth/web"
 	"github.com/hanfeilong/onlineplaytgvideo/internal/db"
 	"github.com/hanfeilong/onlineplaytgvideo/internal/httpx"
+	"github.com/hanfeilong/onlineplaytgvideo/internal/indexer"
 )
 
 type ChannelsHandlers struct {
-	DB *db.DB
+	DB      *db.DB
+	Indexer *indexer.Indexer
 }
 
 type channelDTO struct {
@@ -107,6 +109,46 @@ func videoToDTO(v db.Video) videoDTO {
 		d.Date = v.Date.Format("2006-01-02T15:04:05Z07:00")
 	}
 	return d
+}
+
+// SyncStart triggers an in-process goroutine that pulls messages.getHistory
+// for the channel and upserts each video row. Idempotent: a second call while
+// running returns the in-flight state.
+//
+// POST /api/channels/:id/sync
+func (h *ChannelsHandlers) SyncStart(w http.ResponseWriter, r *http.Request) {
+	uid, _ := web.UserIDFromContext(r.Context())
+	cid, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		httpx.WriteError(w, httpx.Errorf(http.StatusBadRequest, "bad_id", "invalid channel id"))
+		return
+	}
+	if h.Indexer == nil {
+		httpx.WriteError(w, httpx.Errorf(http.StatusServiceUnavailable, "no_indexer", "syncer not wired"))
+		return
+	}
+	st, err := h.Indexer.SyncStart(r.Context(), cid, uid)
+	if err != nil {
+		httpx.WriteError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, st)
+}
+
+// SyncStatus returns the current state of the sync.
+//
+// GET /api/channels/:id/sync
+func (h *ChannelsHandlers) SyncStatus(w http.ResponseWriter, r *http.Request) {
+	cid, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		httpx.WriteError(w, httpx.Errorf(http.StatusBadRequest, "bad_id", "invalid channel id"))
+		return
+	}
+	if h.Indexer == nil {
+		httpx.WriteJSON(w, http.StatusOK, indexer.SyncState{})
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, h.Indexer.SyncStatus(cid))
 }
 
 // ClearVideos removes every video row for a channel. Used before a fresh

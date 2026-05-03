@@ -25,6 +25,9 @@ type Indexer struct {
 
 	mu              sync.Mutex
 	discoverRunning map[int64]struct{} // sessionID
+
+	syncMu sync.Mutex
+	syncs  map[int64]*syncEntry // channelID
 }
 
 func New(cfg *config.Config, database *db.DB, mgr *tgmanager.Manager) *Indexer {
@@ -33,6 +36,7 @@ func New(cfg *config.Config, database *db.DB, mgr *tgmanager.Manager) *Indexer {
 		db:              database,
 		tgmgr:           mgr,
 		discoverRunning: map[int64]struct{}{},
+		syncs:           map[int64]*syncEntry{},
 	}
 }
 
