@@ -60,12 +60,26 @@ export function Player() {
   const [containerHint, setContainerHint] = useState<string>("");
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const flvPlayerRef = useRef<mpegts.Player | null>(null);
+  const sidebarRef = useRef<HTMLElement | null>(null);
+
+  // Stable string of the search params; used both as react-query cache key
+  // and as a dependency for the "scroll-into-view" effect.
+  const playlistKey = searchParams.toString();
 
   useEffect(() => {
     setMediaErr(null);
     setStreamDiag(null);
     setContainerHint("");
   }, [id]);
+
+  // Scroll the highlighted item into view when video changes. block:nearest
+  // means: if it's already visible, don't move; if it's off-screen, bring it
+  // to the closest edge — preserving the user's scroll context.
+  useEffect(() => {
+    if (!sidebarRef.current || !id) return;
+    const el = sidebarRef.current.querySelector<HTMLElement>(`[data-video-id="${id}"]`);
+    if (el) el.scrollIntoView({ block: "nearest", behavior: "auto" });
+  }, [id, playlistKey]);
 
   const meta = useQuery<VideoResp>({
     queryKey: ["video", id],
@@ -75,7 +89,6 @@ export function Player() {
 
   // Playlist (siblings from the same context). queryKey only depends on
   // search-params content,so it doesn't refetch when only the video id changes.
-  const playlistKey = searchParams.toString();
   const playlist = useQuery<VideosResp>({
     queryKey: ["playlist", playlistKey],
     enabled: !!playlistRequest(searchParams),
@@ -239,7 +252,7 @@ export function Player() {
 
         {/* playlist sidebar */}
         {hasPlaylist && (
-          <aside className="lg:w-80 max-h-[85vh] overflow-y-auto bg-slate-900 border-l border-slate-800 shrink-0">
+          <aside ref={sidebarRef} className="lg:w-80 max-h-[85vh] overflow-y-auto bg-slate-900 border-l border-slate-800 shrink-0">
             <div className="px-3 py-2 text-xs text-slate-400 border-b border-slate-800 sticky top-0 bg-slate-900">
               播放列表 · {list.length} 条 ({currentIdx + 1}/{list.length})
             </div>
@@ -248,6 +261,7 @@ export function Player() {
               return (
                 <button
                   key={item.id}
+                  data-video-id={item.id}
                   onClick={() => goToVideo(item.id)}
                   className={
                     "w-full text-left px-3 py-2 border-b border-slate-800/50 flex gap-2 items-start " +
