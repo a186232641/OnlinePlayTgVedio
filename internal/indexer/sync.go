@@ -145,7 +145,10 @@ func (i *Indexer) runSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
 		return
 	}
 
-	const progressEvery = 500 // log a progress line every N messages walked
+	// Phase 1: TG 的 messages.getHistory 只能从新往旧翻,先把"新于 maxSeen"
+	// 的消息全部收集到内存里。
+	const progressEvery = 1000
+	var pending []*tg.Message
 	walked := 0
 	lastTickAt := time.Now()
 
@@ -159,23 +162,12 @@ func (i *Indexer) runSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
 			if maxSeen > 0 && int64(msg.ID) <= maxSeen {
 				return stopErr
 			}
-			v := videoFromTGMessage(ch, msg)
-			if v == nil {
-				st.update(func(s *SyncState) { s.Skipped++ })
-			} else {
-				if _, err := i.db.UpsertVideo(ctx, v); err != nil {
-					return fmt.Errorf("upsert msg=%d: %w", msg.ID, err)
-				}
-				st.update(func(s *SyncState) { s.Imported++ })
-			}
+			pending = append(pending, msg)
 			walked++
 			if walked%progressEvery == 0 {
-				snap := st.snapshot()
-				slog.Info("sync progress",
+				slog.Info("sync fetch",
 					"channel_id", ch.ID,
-					"walked", walked,
-					"imported", snap.Imported,
-					"skipped", snap.Skipped,
+					"fetched", walked,
 					"current_msg_id", msg.ID,
 					"page_dur_ms", time.Since(lastTickAt).Milliseconds(),
 				)
@@ -183,6 +175,57 @@ func (i *Indexer) runSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
 			}
 			return nil
 		})
+
+	if err != nil && !errors.Is(err, stopErr) && !errors.Is(err, context.Canceled) {
+		slog.Warn("sync fetch failed", "channel_id", ch.ID, "err", err)
+		st.update(func(s *SyncState) { s.LastError = err.Error() })
+		return
+	}
+
+	// Phase 2: 反转,从最旧的消息开始写入,这样进度日志和数据库 created_at
+	// 顺序都和 Telegram 上的时间顺序一致。
+	for i2, j := 0, len(pending)-1; i2 < j; i2, j = i2+1, j-1 {
+		pending[i2], pending[j] = pending[j], pending[i2]
+	}
+	slog.Info("sync write start",
+		"channel_id", ch.ID,
+		"to_write", len(pending),
+	)
+
+	written := 0
+	lastTickAt = time.Now()
+	for _, msg := range pending {
+		select {
+		case <-ctx.Done():
+			st.update(func(s *SyncState) { s.LastError = "canceled" })
+			return
+		default:
+		}
+		v := videoFromTGMessage(ch, msg)
+		if v == nil {
+			st.update(func(s *SyncState) { s.Skipped++ })
+		} else {
+			if _, uerr := i.db.UpsertVideo(ctx, v); uerr != nil {
+				slog.Warn("sync upsert failed", "channel_id", ch.ID, "msg_id", msg.ID, "err", uerr)
+				st.update(func(s *SyncState) { s.LastError = uerr.Error() })
+				return
+			}
+			st.update(func(s *SyncState) { s.Imported++ })
+		}
+		written++
+		if written%progressEvery == 0 {
+			snap := st.snapshot()
+			slog.Info("sync write",
+				"channel_id", ch.ID,
+				"written", written, "of", len(pending),
+				"imported", snap.Imported, "skipped", snap.Skipped,
+				"current_msg_id", msg.ID,
+				"page_dur_ms", time.Since(lastTickAt).Milliseconds(),
+			)
+			lastTickAt = time.Now()
+		}
+	}
+	err = nil // both phases done
 
 	if err != nil && !errors.Is(err, stopErr) && !errors.Is(err, context.Canceled) {
 		slog.Warn("sync failed", "channel_id", ch.ID, "err", err)
