@@ -114,10 +114,6 @@ func (h *ChannelsHandlers) Import(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.Errorf(http.StatusNotFound, "not_found", "channel not found"))
 		return
 	}
-	if ch.DialogKind == db.DialogKindForum {
-		httpx.WriteError(w, httpx.Errorf(http.StatusBadRequest, "forum_root", "导入针对具体频道/话题,论坛容器本身不能直接导入"))
-		return
-	}
 
 	// Cap upload at 1 GiB. Real-world JSON exports are typically <100 MiB.
 	if err := r.ParseMultipartForm(1 << 30); err != nil {

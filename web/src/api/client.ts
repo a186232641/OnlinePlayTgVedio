@@ -39,22 +39,12 @@ export const api = {
 
 // --- Types ---
 
-export type DialogKind = "channel" | "megagroup" | "forum" | "topic" | "group" | "user";
-
-export type IndexStatus = "idle" | "queued" | "running" | "failed";
-
 export interface Channel {
   id: number;
   tg_session_id: number;
   tg_channel_id: number;
   title: string;
   username?: string;
-  dialog_kind: DialogKind;
-  parent_channel_id?: number | null;
-  topic_id?: number | null;
-  index_enabled: boolean;
-  index_status: IndexStatus;
-  index_error?: string;
   video_count: number;
   last_indexed_at?: string;
 }
@@ -69,7 +59,6 @@ export interface Video {
   size_bytes: number;
   mime: string;
   sent_at?: string;
-  thumb_url?: string;
   stream_url: string;
 }
 

@@ -106,71 +106,10 @@ func (d *DB) MarkChannelIndexed(ctx context.Context, channelID int64, videoCount
 	return err
 }
 
-func (d *DB) SetChannelIndexEnabled(ctx context.Context, channelID, userID int64, enabled bool) error {
-	_, err := d.Exec(ctx, `
-        UPDATE channels
-        SET index_enabled=$3,
-            index_status=CASE WHEN $3 THEN 'queued' ELSE 'idle' END,
-            index_error=NULL
-        WHERE id=$1 AND user_id=$2
-    `, channelID, userID, enabled)
-	return err
-}
-
-// SetForumChildrenIndexEnabled bulk-toggles every topic row under a forum.
-// The forum container itself stays index_enabled=false (it has no feed of
-// its own); only topic children are crawled by the worker.
-// Returns how many rows were affected.
-func (d *DB) SetForumChildrenIndexEnabled(ctx context.Context, forumID, userID int64, enabled bool) (int64, error) {
-	tag, err := d.Exec(ctx, `
-        UPDATE channels
-        SET index_enabled=$3,
-            index_status=CASE WHEN $3 THEN 'queued' ELSE 'idle' END,
-            index_error=NULL
-        WHERE parent_channel_id=$1 AND user_id=$2 AND dialog_kind='topic'
-    `, forumID, userID, enabled)
-	if err != nil {
-		return 0, err
-	}
-	return tag.RowsAffected(), nil
-}
-
-func (d *DB) SetChannelIndexStatus(ctx context.Context, channelID int64, status, errMsg string) error {
-	_, err := d.Exec(ctx, `
-        UPDATE channels SET index_status=$2, index_error=NULLIF($3,'') WHERE id=$1
-    `, channelID, status, errMsg)
-	return err
-}
-
-// ClaimNextChannelToIndex atomically picks one queued channel for a session
-// and flips it to 'running'. Returns nil/ErrNotFound when nothing is queued.
-func (d *DB) ClaimNextChannelToIndex(ctx context.Context, sessionID int64) (*Channel, error) {
-	row := d.QueryRow(ctx, `
-        UPDATE channels c SET index_status='running'
-        WHERE c.id = (
-            SELECT id FROM channels
-            WHERE tg_session_id=$1 AND index_enabled=TRUE
-              AND index_status IN ('queued','idle')
-              AND dialog_kind <> 'forum'
-            ORDER BY last_indexed_at NULLS FIRST, id
-            LIMIT 1
-            FOR UPDATE SKIP LOCKED
-        )
-        RETURNING `+channelCols, sessionID)
-	c, err := scanChannel(row)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrNotFound
-		}
-		return nil, err
-	}
-	return c, nil
-}
 
 type ListChannelsOpts struct {
-	UserID      int64
-	SessionID   int64 // 0 = all sessions for this user
-	OnlyEnabled bool
+	UserID    int64
+	SessionID int64 // 0 = all sessions for this user
 }
 
 func (d *DB) ListChannels(ctx context.Context, opt ListChannelsOpts) ([]Channel, error) {
@@ -185,15 +124,7 @@ func (d *DB) ListChannels(ctx context.Context, opt ListChannelsOpts) ([]Channel,
 		args = append(args, opt.SessionID)
 		q += ` AND c.tg_session_id=$2`
 	}
-	if opt.OnlyEnabled {
-		q += ` AND c.index_enabled=TRUE`
-	}
-	q += ` ORDER BY
-        c.parent_channel_id NULLS FIRST,
-        COALESCE(c.parent_channel_id, c.id),
-        c.topic_id NULLS FIRST,
-        c.last_indexed_at DESC NULLS LAST,
-        c.title`
+	q += ` ORDER BY c.last_indexed_at DESC NULLS LAST, c.title`
 
 	rows, err := d.Query(ctx, q, args...)
 	if err != nil {

@@ -3,9 +3,8 @@ import { useQuery } from "@tanstack/react-query";
 
 import { api, Channel, TgSession } from "../api/client";
 
-// Browsing view. Two kinds of cards:
-//   - playable: regular channels/megagroups/topics with index_enabled=true
-//   - forum folders: dialog_kind=forum (entry point to its topic list)
+// Browsing view: any channel that has imported videos shows up as a card.
+// Forums and topics are filtered out by the backend.
 export function Channels() {
   const sessions = useQuery<{ sessions: TgSession[] }>({
     queryKey: ["sessions"],
@@ -30,70 +29,27 @@ export function Channels() {
   }
 
   const channels = all.data?.channels ?? [];
-  // A channel is browsable if it has any videos cached (from indexer or
-  // JSON import) OR the index toggle is on (so "刚开启,还没扫到"也能看到状态).
-  const browsable = channels.filter(
-    (c) => c.dialog_kind !== "forum" && (c.video_count > 0 || c.index_enabled),
-  );
-  const forums = channels.filter((c) => c.dialog_kind === "forum");
+  const browsable = channels.filter((c) => c.video_count > 0);
 
-  if (browsable.length === 0 && forums.length === 0) {
+  if (browsable.length === 0) {
     return (
       <div className="p-6 text-slate-400 space-y-2">
-        <div>还没有可浏览的频道。</div>
-        <Link to="/tg/accounts" className="text-emerald-400 hover:text-emerald-300">去 TG 账号管理 →</Link>
+        <div>还没有导入任何视频。</div>
+        <Link to="/tg/accounts" className="text-emerald-400 hover:text-emerald-300">去 TG 账号管理上传 JSON →</Link>
       </div>
     );
   }
 
   return (
-    <div className="p-6 space-y-8">
-      {forums.length > 0 && (
-        <section>
-          <h2 className="text-sm uppercase text-slate-500 tracking-wide mb-3">论坛 (点入查看话题)</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {forums.map((f) => {
-              const topicCount = channels.filter((c) => c.parent_channel_id === f.id).length;
-              return (
-                <Link
-                  key={f.id}
-                  to={`/channels/${f.id}`}
-                  className="p-4 rounded bg-slate-900 border border-slate-800 hover:border-purple-700 flex items-center gap-3"
-                >
-                  <span className="text-2xl">📁</span>
-                  <div className="min-w-0">
-                    <div className="font-medium truncate">{f.title}</div>
-                    <div className="text-xs text-slate-500">{topicCount} 个话题</div>
-                  </div>
-                </Link>
-              );
-            })}
-          </div>
-        </section>
-      )}
-
-      {browsable.length > 0 && (
-        <section>
-          <h2 className="text-sm uppercase text-slate-500 tracking-wide mb-3">频道</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {browsable.map((c) => (
-              <Link key={c.id} to={`/channels/${c.id}`}
-                    className="p-4 rounded bg-slate-900 border border-slate-800 hover:border-emerald-700">
-                <div className="font-medium truncate">{c.title}</div>
-                {c.username && <div className="text-xs text-slate-400">@{c.username}</div>}
-                <div className="text-xs mt-2 text-slate-500 flex items-center gap-2">
-                  <span>{c.video_count} 视频</span>
-                  {c.dialog_kind === "topic" && <span className="text-purple-300">话题</span>}
-                  {!c.index_enabled && c.video_count > 0 && (
-                    <span className="text-sky-300" title="通过 JSON 导入或一次性 live-fetch 缓存">已缓存</span>
-                  )}
-                  {c.index_status === "running" && <span className="text-amber-300">索引中…</span>}
-                </div>
-              </Link>
-            ))}
-          </div>
-        </section>
-      )}
+    <div className="p-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+      {browsable.map((c) => (
+        <Link key={c.id} to={`/channels/${c.id}`}
+              className="p-4 rounded bg-slate-900 border border-slate-800 hover:border-emerald-700">
+          <div className="font-medium truncate">{c.title}</div>
+          {c.username && <div className="text-xs text-slate-400">@{c.username}</div>}
+          <div className="text-xs mt-2 text-slate-500">{c.video_count} 视频</div>
+        </Link>
+      ))}
     </div>
   );
 }

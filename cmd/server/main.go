@@ -53,13 +53,6 @@ func main() {
 
 	idx := indexer.New(cfg, database, tgMgr)
 
-	// Spin up an indexing worker for every session that came back online.
-	if refs, err := database.ListActiveTGSessions(rootCtx); err == nil {
-		for _, ref := range refs {
-			idx.EnsureWorker(ref.ID)
-		}
-	}
-
 	cacheMgr := cache.New(cfg, database, tgMgr)
 	if err := cacheMgr.Start(rootCtx); err != nil {
 		slog.Error("cache start failed", "err", err)
@@ -74,7 +67,6 @@ func main() {
 			slog.Warn("start tg client after login", "user_id", uid, "session_id", sid, "err", err)
 			return
 		}
-		idx.EnsureWorker(sid)
 		idx.TriggerDiscover(sid)
 	})
 
