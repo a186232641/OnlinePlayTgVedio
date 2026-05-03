@@ -19,9 +19,9 @@ export function TgBind() {
     setFlowId(resp.flow_id);
     setStage(resp.stage);
     if (resp.stage === "done") {
-      qc.invalidateQueries({ queryKey: ["tg"] });
-      qc.invalidateQueries({ queryKey: ["index"] });
-      nav("/", { replace: true });
+      qc.invalidateQueries({ queryKey: ["sessions"] });
+      qc.invalidateQueries({ queryKey: ["channels"] });
+      nav("/tg/accounts", { replace: true });
     }
   };
 

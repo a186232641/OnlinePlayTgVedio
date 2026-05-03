@@ -33,16 +33,28 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 export const api = {
   get: <T>(path: string) => request<T>("GET", path),
   post: <T>(path: string, body?: unknown) => request<T>("POST", path, body),
+  patch: <T>(path: string, body?: unknown) => request<T>("PATCH", path, body),
   del: <T>(path: string) => request<T>("DELETE", path),
 };
 
 // --- Types ---
 
+export type DialogKind = "channel" | "megagroup" | "forum" | "topic" | "group" | "user";
+
+export type IndexStatus = "idle" | "queued" | "running" | "failed";
+
 export interface Channel {
   id: number;
+  tg_session_id: number;
   tg_channel_id: number;
   title: string;
   username?: string;
+  dialog_kind: DialogKind;
+  parent_channel_id?: number | null;
+  topic_id?: number | null;
+  index_enabled: boolean;
+  index_status: IndexStatus;
+  index_error?: string;
   video_count: number;
   last_indexed_at?: string;
 }
@@ -61,19 +73,14 @@ export interface Video {
   stream_url: string;
 }
 
-export interface IndexStatus {
-  status: "idle" | "running" | "done" | "failed";
-  channels_total?: number;
-  channels_done?: number;
-  videos_found?: number;
-  last_error?: string;
-}
-
-export interface TgStatus {
-  bound: boolean;
+export interface TgSession {
+  id: number;
   phone?: string;
   tg_user_id?: number;
-  status?: string;
+  label?: string;
+  status: "pending" | "active" | "revoked";
+  discover_status?: "idle" | "running" | "done" | "failed";
+  discover_error?: string;
 }
 
 export interface Me {

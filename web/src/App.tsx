@@ -6,6 +6,8 @@ import { Layout } from "./components/Layout";
 import { Login } from "./pages/Login";
 import { Register } from "./pages/Register";
 import { TgBind } from "./pages/TgBind";
+import { TgAccounts } from "./pages/TgAccounts";
+import { SessionChannels } from "./pages/SessionChannels";
 import { Channels } from "./pages/Channels";
 import { ChannelDetail } from "./pages/ChannelDetail";
 import { Player } from "./pages/Player";
@@ -41,6 +43,8 @@ export default function App() {
         <Route path="/favorites" element={<Favorites />} />
         <Route path="/search" element={<Search />} />
         <Route path="/tg/bind" element={<TgBind />} />
+        <Route path="/tg/accounts" element={<TgAccounts />} />
+        <Route path="/tg/accounts/:id/channels" element={<SessionChannels />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

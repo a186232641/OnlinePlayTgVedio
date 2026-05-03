@@ -1,16 +1,22 @@
 import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 
-import { api, IndexStatus, TgStatus } from "../api/client";
+import { api, TgSession } from "../api/client";
 
 export function Layout() {
   const nav = useNavigate();
-  const tg = useQuery<TgStatus>({ queryKey: ["tg"], queryFn: () => api.get("/api/tg/status") });
-  const idx = useQuery<IndexStatus>({
-    queryKey: ["index"],
-    queryFn: () => api.get("/api/index/status"),
-    refetchInterval: (q) => (q.state.data?.status === "running" ? 2000 : false),
+  const sessions = useQuery<{ sessions: TgSession[] }>({
+    queryKey: ["sessions"],
+    queryFn: () => api.get("/api/tg/sessions/"),
+    refetchInterval: (q) => {
+      const list = q.state.data?.sessions ?? [];
+      return list.some((s) => s.discover_status === "running") ? 2000 : false;
+    },
   });
+
+  const list = sessions.data?.sessions ?? [];
+  const noAccount = !sessions.isLoading && list.length === 0;
+  const anyDiscovering = list.some((s) => s.discover_status === "running");
 
   const onLogout = async () => {
     await api.post("/api/auth/logout");
@@ -27,13 +33,10 @@ export function Layout() {
         <NavLink to="/" end className={linkCls}>频道</NavLink>
         <NavLink to="/favorites" className={linkCls}>收藏</NavLink>
         <NavLink to="/search" className={linkCls}>搜索</NavLink>
-        {tg.data && !tg.data.bound && <NavLink to="/tg/bind" className={linkCls}>绑定 TG</NavLink>}
+        <NavLink to="/tg/accounts" className={linkCls}>TG 账号 ({list.length})</NavLink>
+        {noAccount && <NavLink to="/tg/bind" className={linkCls}>绑定 TG</NavLink>}
         <div className="flex-1" />
-        {idx.data?.status === "running" && (
-          <span className="text-xs text-amber-300">
-            索引中 {idx.data.channels_done}/{idx.data.channels_total} · {idx.data.videos_found} 视频
-          </span>
-        )}
+        {anyDiscovering && <span className="text-xs text-amber-300">发现频道中…</span>}
         <button onClick={onLogout} className="text-sm text-slate-400 hover:text-slate-100">退出</button>
       </header>
       <main className="flex-1 overflow-auto"><Outlet /></main>
