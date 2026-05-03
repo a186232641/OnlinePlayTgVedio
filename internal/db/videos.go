@@ -43,17 +43,21 @@ type Video struct {
 	FileReference []byte
 }
 
+// All columns prefixed with v. so SELECT works even when the FROM clause
+// joins another table with overlapping column names (favorites has user_id,
+// causing "column reference is ambiguous (SQLSTATE 42702)" without the
+// alias).
 const videoCols = `
-    id, user_id, channel_id,
-    tg_msg_id, COALESCE(msg_type, ''),
-    date, edited,
-    COALESCE(from_name, ''), COALESCE(from_id, ''),
-    COALESCE(file, ''), COALESCE(file_name, ''), COALESCE(file_size, 0),
-    COALESCE(thumbnail, ''), COALESCE(thumbnail_file_size, 0),
-    COALESCE(media_type, ''), COALESCE(mime_type, ''),
-    COALESCE(duration_seconds, 0), COALESCE(width, 0), COALESCE(height, 0),
-    COALESCE(text, ''), text_entities,
-    COALESCE(tg_doc_id, 0), COALESCE(access_hash, 0), file_reference
+    v.id, v.user_id, v.channel_id,
+    v.tg_msg_id, COALESCE(v.msg_type, ''),
+    v.date, v.edited,
+    COALESCE(v.from_name, ''), COALESCE(v.from_id, ''),
+    COALESCE(v.file, ''), COALESCE(v.file_name, ''), COALESCE(v.file_size, 0),
+    COALESCE(v.thumbnail, ''), COALESCE(v.thumbnail_file_size, 0),
+    COALESCE(v.media_type, ''), COALESCE(v.mime_type, ''),
+    COALESCE(v.duration_seconds, 0), COALESCE(v.width, 0), COALESCE(v.height, 0),
+    COALESCE(v.text, ''), v.text_entities,
+    COALESCE(v.tg_doc_id, 0), COALESCE(v.access_hash, 0), v.file_reference
 `
 
 func scanVideo(row pgx.Row) (*Video, error) {
