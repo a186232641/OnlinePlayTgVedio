@@ -1,5 +1,5 @@
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import mpegts from "mpegts.js";
 
@@ -96,6 +96,10 @@ export function Player() {
     queryKey: ["video", id],
     queryFn: () => api.get(`/api/videos/${id}`),
     enabled: !!id,
+    // Keep showing the previous video's metadata while fetching the next, so
+    // the layout (especially the playlist sidebar) doesn't unmount/remount
+    // and lose its scroll position.
+    placeholderData: keepPreviousData,
   });
 
   // Playlist (siblings from the same context). queryKey only depends on
@@ -211,53 +215,59 @@ export function Player() {
     navigate(`/videos/${vid}${params ? "?" + params : ""}`);
   };
 
-  if (meta.isLoading) return <div className="p-6 text-slate-400">加载中…</div>;
-  if (!meta.data) return <div className="p-6 text-red-400">未找到视频</div>;
-  const v = meta.data.video;
+  const v = meta.data?.video;
   const hasPlaylist = list.length > 0;
+  const showLoading = meta.isLoading && !meta.data;
+  const showNotFound = !meta.isLoading && !meta.data;
 
   return (
     <div className="flex flex-col">
       <div className="flex flex-col lg:flex-row">
         {/* video area */}
         <div className="lg:flex-1 bg-black flex items-center justify-center min-h-[40vh] relative">
-          <video
-            key={v.id}
-            ref={videoRef}
-            controls
-            preload="metadata"
-            className="max-w-full max-h-[85vh] outline-none"
-            onEnded={() => {
-              if (next) goToVideo(next.id);
-            }}
-            onError={async (e) => {
-              const code = (e.currentTarget.error?.code ?? 0);
-              setMediaErr(MEDIA_ERR_LABEL[code] ?? `未知(code=${code})`);
-              try {
-                const r = await fetch(v.stream_url, { credentials: "include" });
-                const ct = r.headers.get("content-type") ?? "(none)";
-                const cl = r.headers.get("content-length") ?? "(none)";
-                const cr = r.headers.get("content-range") ?? "(none)";
-                const ab = await r.arrayBuffer();
-                const head = Array.from(new Uint8Array(ab.slice(0, 16)))
-                  .map((b) => b.toString(16).padStart(2, "0"))
-                  .join(" ");
-                setStreamDiag(
-                  `HTTP ${r.status} ${r.statusText}\n` +
-                  `Content-Type: ${ct}\nContent-Length: ${cl}\nContent-Range: ${cr}\n` +
-                  `Body bytes: ${ab.byteLength}\nFirst 16 bytes (hex): ${head}`,
-                );
-              } catch (err: any) {
-                setStreamDiag(`fetch failed: ${err.message ?? err}`);
-              }
-            }}
-          />
-          {mediaErr && (
-            <div className="absolute inset-x-0 bottom-0 bg-red-950/90 text-red-200 text-xs p-3 space-y-1">
-              <div className="font-medium">播放失败: {mediaErr}</div>
-              {streamDiag && <pre className="text-[10px] whitespace-pre-wrap text-red-100/80">{streamDiag}</pre>}
-              <div className="text-red-300/60">stream_url: {v.stream_url}</div>
-            </div>
+          {showLoading && <div className="text-slate-400">加载中…</div>}
+          {showNotFound && <div className="text-red-400 p-6">未找到视频</div>}
+          {v && (
+            <>
+              <video
+                key={v.id}
+                ref={videoRef}
+                controls
+                preload="metadata"
+                className="max-w-full max-h-[85vh] outline-none"
+                onEnded={() => {
+                  if (next) goToVideo(next.id);
+                }}
+                onError={async (e) => {
+                  const code = (e.currentTarget.error?.code ?? 0);
+                  setMediaErr(MEDIA_ERR_LABEL[code] ?? `未知(code=${code})`);
+                  try {
+                    const r = await fetch(v.stream_url, { credentials: "include" });
+                    const ct = r.headers.get("content-type") ?? "(none)";
+                    const cl = r.headers.get("content-length") ?? "(none)";
+                    const cr = r.headers.get("content-range") ?? "(none)";
+                    const ab = await r.arrayBuffer();
+                    const head = Array.from(new Uint8Array(ab.slice(0, 16)))
+                      .map((b) => b.toString(16).padStart(2, "0"))
+                      .join(" ");
+                    setStreamDiag(
+                      `HTTP ${r.status} ${r.statusText}\n` +
+                      `Content-Type: ${ct}\nContent-Length: ${cl}\nContent-Range: ${cr}\n` +
+                      `Body bytes: ${ab.byteLength}\nFirst 16 bytes (hex): ${head}`,
+                    );
+                  } catch (err: any) {
+                    setStreamDiag(`fetch failed: ${err.message ?? err}`);
+                  }
+                }}
+              />
+              {mediaErr && (
+                <div className="absolute inset-x-0 bottom-0 bg-red-950/90 text-red-200 text-xs p-3 space-y-1">
+                  <div className="font-medium">播放失败: {mediaErr}</div>
+                  {streamDiag && <pre className="text-[10px] whitespace-pre-wrap text-red-100/80">{streamDiag}</pre>}
+                  <div className="text-red-300/60">stream_url: {v.stream_url}</div>
+                </div>
+              )}
+            </>
           )}
         </div>
 
@@ -268,7 +278,7 @@ export function Player() {
               播放列表 · {list.length} 条 ({currentIdx + 1}/{list.length})
             </div>
             {list.map((item, i) => {
-              const isCurrent = item.id === v.id;
+              const isCurrent = String(item.id) === id;
               return (
                 <button
                   key={item.id}
@@ -299,45 +309,47 @@ export function Player() {
       </div>
 
       {/* metadata + controls */}
-      <div className="px-6 py-4 max-w-5xl mx-auto w-full space-y-3">
-        <div className="flex items-start gap-4">
-          <div className="flex-1 space-y-1 min-w-0">
-            {v.file_name && <div className="font-medium break-all">{v.file_name}</div>}
-            <div className="whitespace-pre-wrap break-words text-sm text-slate-300">
-              {v.text?.trim() || <span className="text-slate-500">无说明</span>}
+      {v && meta.data && (
+        <div className="px-6 py-4 max-w-5xl mx-auto w-full space-y-3">
+          <div className="flex items-start gap-4">
+            <div className="flex-1 space-y-1 min-w-0">
+              {v.file_name && <div className="font-medium break-all">{v.file_name}</div>}
+              <div className="whitespace-pre-wrap break-words text-sm text-slate-300">
+                {v.text?.trim() || <span className="text-slate-500">无说明</span>}
+              </div>
+            </div>
+            <div className="flex flex-col gap-2 shrink-0">
+              <button onClick={() => fav.mutate()}
+                      className={"px-3 py-2 rounded text-sm " + (meta.data.favorite ? "bg-amber-600" : "bg-slate-800 hover:bg-slate-700")}>
+                {meta.data.favorite ? "★ 已收藏" : "☆ 收藏"}
+              </button>
+              {hasPlaylist && (
+                <div className="flex gap-1">
+                  <button
+                    onClick={() => prev && goToVideo(prev.id)}
+                    disabled={!prev}
+                    className="flex-1 px-2 py-1 text-xs bg-slate-800 hover:bg-slate-700 disabled:opacity-30 rounded"
+                  >上一个</button>
+                  <button
+                    onClick={() => next && goToVideo(next.id)}
+                    disabled={!next}
+                    className="flex-1 px-2 py-1 text-xs bg-slate-800 hover:bg-slate-700 disabled:opacity-30 rounded"
+                  >下一个</button>
+                </div>
+              )}
             </div>
           </div>
-          <div className="flex flex-col gap-2 shrink-0">
-            <button onClick={() => fav.mutate()}
-                    className={"px-3 py-2 rounded text-sm " + (meta.data.favorite ? "bg-amber-600" : "bg-slate-800 hover:bg-slate-700")}>
-              {meta.data.favorite ? "★ 已收藏" : "☆ 收藏"}
-            </button>
-            {hasPlaylist && (
-              <div className="flex gap-1">
-                <button
-                  onClick={() => prev && goToVideo(prev.id)}
-                  disabled={!prev}
-                  className="flex-1 px-2 py-1 text-xs bg-slate-800 hover:bg-slate-700 disabled:opacity-30 rounded"
-                >上一个</button>
-                <button
-                  onClick={() => next && goToVideo(next.id)}
-                  disabled={!next}
-                  className="flex-1 px-2 py-1 text-xs bg-slate-800 hover:bg-slate-700 disabled:opacity-30 rounded"
-                >下一个</button>
-              </div>
-            )}
+          <div className="text-xs text-slate-500 flex flex-wrap gap-3">
+            {v.width > 0 && <span>{v.width}×{v.height}</span>}
+            {v.file_size > 0 && <span>{(v.file_size / 1024 / 1024).toFixed(1)} MB</span>}
+            {v.mime_type && <span>{v.mime_type}</span>}
+            {v.date && <span>{v.date.slice(0, 19).replace("T", " ")}</span>}
+            {v.from && <span>from: {v.from}</span>}
+            {containerHint && <span className="text-emerald-500">{containerHint}</span>}
+            <Link to="/" className="ml-auto text-slate-400 hover:text-slate-200">← 返回</Link>
           </div>
         </div>
-        <div className="text-xs text-slate-500 flex flex-wrap gap-3">
-          {v.width > 0 && <span>{v.width}×{v.height}</span>}
-          {v.file_size > 0 && <span>{(v.file_size / 1024 / 1024).toFixed(1)} MB</span>}
-          {v.mime_type && <span>{v.mime_type}</span>}
-          {v.date && <span>{v.date.slice(0, 19).replace("T", " ")}</span>}
-          {v.from && <span>from: {v.from}</span>}
-          {containerHint && <span className="text-emerald-500">{containerHint}</span>}
-          <Link to="/" className="ml-auto text-slate-400 hover:text-slate-200">← 返回</Link>
-        </div>
-      </div>
+      )}
     </div>
   );
 }
