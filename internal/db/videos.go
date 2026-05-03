@@ -62,6 +62,17 @@ func (d *DB) UpdateVideoFileReference(ctx context.Context, id int64, fr []byte) 
 	return err
 }
 
+// UpdateVideoLocator persists the full Telegram doc locator. Used after
+// JSON-imported placeholder rows get their first refresh, populating
+// tg_doc_id + access_hash + file_reference together.
+func (d *DB) UpdateVideoLocator(ctx context.Context, id int64, tgDocID, accessHash int64, fr []byte) error {
+	_, err := d.Exec(ctx, `
+        UPDATE videos SET tg_doc_id=$2, access_hash=$3, file_reference=$4
+        WHERE id=$1
+    `, id, tgDocID, accessHash, fr)
+	return err
+}
+
 func (d *DB) UpdateVideoThumb(ctx context.Context, id int64, path string) error {
 	_, err := d.Exec(ctx, `UPDATE videos SET thumb_path=$1 WHERE id=$2`, path, id)
 	return err

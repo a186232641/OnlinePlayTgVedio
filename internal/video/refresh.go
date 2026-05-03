@@ -59,12 +59,22 @@ func RefreshFileReference(ctx context.Context, database *db.DB, mgr *tgmanager.M
 		if !ok {
 			continue
 		}
-		if doc.ID != v.TGDocID {
+		// JSON-imported placeholder rows have TGDocID=0; in that case accept
+		// the first non-empty doc on the message. Otherwise require an exact
+		// match to handle messages with multiple media.
+		if v.TGDocID != 0 && doc.ID != v.TGDocID {
 			continue
 		}
-		v.FileReference = doc.FileReference
+		v.TGDocID = doc.ID
 		v.AccessHash = doc.AccessHash
-		if err := database.UpdateVideoFileReference(ctx, v.ID, doc.FileReference); err != nil {
+		v.FileReference = doc.FileReference
+		if v.SizeBytes == 0 {
+			v.SizeBytes = doc.Size
+		}
+		if v.Mime == "" {
+			v.Mime = doc.MimeType
+		}
+		if err := database.UpdateVideoLocator(ctx, v.ID, doc.ID, doc.AccessHash, doc.FileReference); err != nil {
 			return err
 		}
 		return nil

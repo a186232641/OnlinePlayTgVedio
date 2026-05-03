@@ -1,8 +1,25 @@
 import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import { api, Channel, DialogKind } from "../api/client";
+
+interface ImportResp { ok: boolean; imported: number; skipped: number; total: number; }
+
+async function uploadJsonImport(channelId: number, file: File): Promise<ImportResp> {
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await fetch(`/api/channels/${channelId}/import`, {
+    method: "POST",
+    credentials: "include",
+    body: fd,
+  });
+  const payload = await res.json().catch(() => null);
+  if (!res.ok) {
+    throw new Error(payload?.message ?? `上传失败 (${res.status})`);
+  }
+  return payload as ImportResp;
+}
 
 const KIND_LABEL: Record<DialogKind, string> = {
   channel: "频道",
@@ -45,6 +62,14 @@ export function SessionChannels() {
   const disable = useMutation({
     mutationFn: (cid: number) => api.del(`/api/channels/${cid}/index`),
     onSettled: () => qc.invalidateQueries({ queryKey: ["channels"] }),
+  });
+  const importJson = useMutation({
+    mutationFn: ({ cid, file }: { cid: number; file: File }) => uploadJsonImport(cid, file),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["channels"] }),
+    onSuccess: (resp) => {
+      alert(`导入完成: 写入 ${resp.imported} 条视频,跳过 ${resp.skipped} 条非视频消息(总 ${resp.total})。\n\n首次播放时会从 TG 现取 file_reference,稍慢一点。`);
+    },
+    onError: (err: Error) => alert(`导入失败: ${err.message}`),
   });
 
   const list = q.data?.channels ?? [];
@@ -111,6 +136,8 @@ export function SessionChannels() {
             children={grouped.get(c.id) ?? []}
             onEnable={enable.mutate}
             onDisable={disable.mutate}
+            onImport={(file) => importJson.mutate({ cid: c.id, file })}
+            importing={importJson.isPending && importJson.variables?.cid === c.id}
           />
         ))}
       </div>
@@ -119,15 +146,18 @@ export function SessionChannels() {
 }
 
 function ChannelRow({
-  c, children, onEnable, onDisable,
+  c, children, onEnable, onDisable, onImport, importing,
 }: {
   c: Channel;
   children: Channel[];
   onEnable: (id: number) => void;
   onDisable: (id: number) => void;
+  onImport?: (file: File) => void;
+  importing?: boolean;
 }) {
   const isForum = c.dialog_kind === "forum";
   const [expanded, setExpanded] = useState(isForum);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const enabledChildCount = children.filter((t) => t.index_enabled).length;
   const totalChildCount = children.length;
@@ -188,6 +218,27 @@ function ChannelRow({
             onClick={() => onEnable(c.id)}
             className="px-3 py-1 text-xs bg-emerald-700 hover:bg-emerald-600 rounded"
           >开启索引</button>
+        )}
+        {!isForum && onImport && (
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) onImport(f);
+                e.target.value = "";
+              }}
+            />
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={importing}
+              className="px-3 py-1 text-xs bg-sky-800 hover:bg-sky-700 disabled:opacity-50 rounded"
+              title="上传 TG Desktop 导出的 result.json,跳过实时索引"
+            >{importing ? "上传中…" : "导入 JSON"}</button>
+          </>
         )}
       </div>
       {isForum && expanded && children.length > 0 && (

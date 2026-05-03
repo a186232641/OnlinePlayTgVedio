@@ -74,6 +74,15 @@ func (s *StreamServer) serveFromTelegram(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// JSON-imported rows start with TGDocID=0 / empty FileReference; resolve
+	// the locator on first play by hitting channels.getMessages.
+	if v.TGDocID == 0 || len(v.FileReference) == 0 {
+		if err := RefreshFileReference(r.Context(), s.DB, s.TG, v); err != nil {
+			httpx.WriteError(w, httpx.Errorf(http.StatusServiceUnavailable, "tg_resolve", "无法从 Telegram 解析视频(可能消息已删除或你已退出频道): "+err.Error()))
+			return
+		}
+	}
+
 	if v.SizeBytes <= 0 {
 		httpx.WriteError(w, httpx.Errorf(http.StatusInternalServerError, "no_size", "video size unknown"))
 		return
