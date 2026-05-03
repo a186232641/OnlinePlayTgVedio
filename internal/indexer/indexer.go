@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -370,6 +371,14 @@ func inputPeerForChannel(c *db.Channel) (tg.InputPeerClass, error) {
 	}
 }
 
+// videoDocFromMessage returns the doc carried by msg if it looks like a video.
+// We accept two signals:
+//
+//	1. DocumentAttributeVideo  — Telegram's first-class video uploads
+//	2. mime_type prefix "video/" — videos uploaded as plain file documents
+//
+// Many channels post .mp4 etc. as plain documents (no DocumentAttributeVideo);
+// matching by MIME catches those.
 func videoDocFromMessage(msg *tg.Message) *tg.Document {
 	media, ok := msg.Media.(*tg.MessageMediaDocument)
 	if !ok {
@@ -383,6 +392,9 @@ func videoDocFromMessage(msg *tg.Message) *tg.Document {
 		if _, ok := attr.(*tg.DocumentAttributeVideo); ok {
 			return doc
 		}
+	}
+	if strings.HasPrefix(strings.ToLower(doc.MimeType), "video/") {
+		return doc
 	}
 	return nil
 }
