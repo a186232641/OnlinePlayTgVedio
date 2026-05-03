@@ -193,6 +193,8 @@ func (s *StreamServer) streamRange(ctx context.Context, api *tg.Client, v *db.Vi
 		}
 		resp, err := api.UploadGetFile(ctx, req)
 		if err != nil {
+			slog.Warn("upload.getFile failed",
+				"video_id", v.ID, "offset", alignedOffset, "limit", want, "err", err)
 			if !refreshed && tgerr.Is(err, "FILE_REFERENCE_EXPIRED") {
 				refreshed = true
 				if rerr := RefreshFileReference(ctx, s.DB, s.TG, v); rerr == nil {
@@ -206,10 +208,24 @@ func (s *StreamServer) streamRange(ctx context.Context, api *tg.Client, v *db.Vi
 
 		uf, ok := resp.(*tg.UploadFile)
 		if !ok {
+			slog.Warn("upload.getFile returned non-UploadFile (CDN?)",
+				"video_id", v.ID, "type", fmt.Sprintf("%T", resp))
 			return fmt.Errorf("unexpected response type %T (CDN unsupported)", resp)
 		}
 		data := uf.Bytes
+		if cursor == start && len(data) >= 8 {
+			// On the first chunk, log the magic bytes so we can confirm it
+			// looks like a valid mp4 (00 00 00 ?? 66 74 79 70 'ftyp') vs
+			// some other container or random garbage.
+			slog.Info("stream first-chunk header",
+				"video_id", v.ID,
+				"chunk_size", len(data),
+				"hex8", fmt.Sprintf("%02x %02x %02x %02x %02x %02x %02x %02x",
+					data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]),
+			)
+		}
 		if len(data) == 0 {
+			slog.Info("stream EOF (empty chunk)", "video_id", v.ID, "cursor", cursor)
 			break // EOF.
 		}
 		// Trim front (alignment skip) and back (range tail).
