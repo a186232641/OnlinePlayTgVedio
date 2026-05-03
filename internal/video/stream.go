@@ -54,11 +54,23 @@ func (s *StreamServer) Handler() http.HandlerFunc {
 			return
 		}
 
+		slog.Info("stream request",
+			"method", r.Method,
+			"video_id", v.ID,
+			"tg_msg_id", v.TGMsgID,
+			"tg_doc_id", v.TGDocID,
+			"file_size", v.FileSize,
+			"has_ref", len(v.FileReference) > 0,
+			"range", r.Header.Get("Range"),
+		)
+
 		// Fast path: cached file present and complete.
-		if path, ok := s.Cache.CompletePathFor(r.Context(), v.TGDocID); ok {
-			s.Cache.Touch(r.Context(), v.TGDocID)
-			http.ServeFile(w, r, path)
-			return
+		if v.TGDocID != 0 {
+			if path, ok := s.Cache.CompletePathFor(r.Context(), v.TGDocID); ok {
+				s.Cache.Touch(r.Context(), v.TGDocID)
+				http.ServeFile(w, r, path)
+				return
+			}
 		}
 
 		s.serveFromTelegram(w, r, v)
