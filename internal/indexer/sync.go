@@ -97,7 +97,36 @@ func (i *Indexer) runSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
 	}
 
 	maxSeen, _ := i.db.MaxTGMsgID(ctx, ch.ID, ch.UserID)
-	slog.Info("sync start", "channel_id", ch.ID, "title", ch.Title, "max_seen", maxSeen)
+	slog.Info("sync start",
+		"channel_id", ch.ID, "title", ch.Title,
+		"tg_channel_id", ch.TGChannelID, "access_hash", ch.AccessHash,
+		"dialog_kind", ch.DialogKind, "max_seen", maxSeen,
+	)
+
+	// Probe: directly call MessagesGetHistory once and log the raw count.
+	// If this returns 0 messages, no point iterating — almost always means
+	// the access_hash is stale or we lost membership in the channel.
+	probe, perr := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+		Peer:  peer,
+		Limit: 5,
+	})
+	if perr != nil {
+		slog.Warn("sync probe failed", "channel_id", ch.ID, "err", perr)
+		st.update(func(s *SyncState) { s.LastError = "probe: " + perr.Error() })
+		return
+	}
+	probeMsgs := extractMessages(probe)
+	slog.Info("sync probe ok",
+		"channel_id", ch.ID,
+		"resp_type", fmt.Sprintf("%T", probe),
+		"messages", len(probeMsgs),
+	)
+	if len(probeMsgs) == 0 {
+		st.update(func(s *SyncState) {
+			s.LastError = "TG 返回 0 条历史消息(可能 access_hash 已过期或失去访问权限,试着在 TG 账号管理页'重新发现')"
+		})
+		return
+	}
 
 	const progressEvery = 500 // log a progress line every N messages walked
 	walked := 0
@@ -235,5 +264,20 @@ func inputPeerForChannel(c *db.Channel) (tg.InputPeerClass, error) {
 		return &tg.InputPeerUser{UserID: c.TGChannelID, AccessHash: c.AccessHash}, nil
 	default:
 		return &tg.InputPeerChannel{ChannelID: c.TGChannelID, AccessHash: c.AccessHash}, nil
+	}
+}
+
+// extractMessages flattens the various MessagesMessagesClass response shapes
+// into a single []MessageClass.
+func extractMessages(resp tg.MessagesMessagesClass) []tg.MessageClass {
+	switch r := resp.(type) {
+	case *tg.MessagesMessages:
+		return r.Messages
+	case *tg.MessagesMessagesSlice:
+		return r.Messages
+	case *tg.MessagesChannelMessages:
+		return r.Messages
+	default:
+		return nil
 	}
 }
