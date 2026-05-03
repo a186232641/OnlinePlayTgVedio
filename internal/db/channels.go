@@ -43,12 +43,15 @@ type Channel struct {
 	LastIndexedAt   *time.Time
 }
 
+// All columns are qualified with the c.* alias because some queries
+// (ListChannels) JOIN tg_sessions which also has id/user_id and would
+// otherwise trigger "column reference ... is ambiguous" (SQLSTATE 42702).
 const channelCols = `
-    id, user_id, COALESCE(tg_session_id, 0), tg_channel_id, access_hash, title,
-    COALESCE(username, ''), COALESCE(photo_path, ''),
-    dialog_kind, parent_channel_id, topic_id,
-    index_enabled, COALESCE(index_status, 'idle'), COALESCE(index_error, ''),
-    video_count, last_indexed_at
+    c.id, c.user_id, COALESCE(c.tg_session_id, 0), c.tg_channel_id, c.access_hash, c.title,
+    COALESCE(c.username, ''), COALESCE(c.photo_path, ''),
+    c.dialog_kind, c.parent_channel_id, c.topic_id,
+    c.index_enabled, COALESCE(c.index_status, 'idle'), COALESCE(c.index_error, ''),
+    c.video_count, c.last_indexed_at
 `
 
 func scanChannel(row pgx.Row) (*Channel, error) {
@@ -125,8 +128,8 @@ func (d *DB) SetChannelIndexStatus(ctx context.Context, channelID int64, status,
 // and flips it to 'running'. Returns nil/ErrNotFound when nothing is queued.
 func (d *DB) ClaimNextChannelToIndex(ctx context.Context, sessionID int64) (*Channel, error) {
 	row := d.QueryRow(ctx, `
-        UPDATE channels SET index_status='running'
-        WHERE id = (
+        UPDATE channels c SET index_status='running'
+        WHERE c.id = (
             SELECT id FROM channels
             WHERE tg_session_id=$1 AND index_enabled=TRUE
               AND index_status IN ('queued','idle')
