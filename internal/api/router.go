@@ -40,7 +40,7 @@ func NewRouter(d Deps) http.Handler {
 
 	authH := &handlers.AuthHandlers{Cfg: cfg, DB: database}
 	tgH := &handlers.TGLoginHandlers{DB: database, Login: d.Login, TGMgr: d.TGMgr, Indexer: d.Indexer}
-	chH := &handlers.ChannelsHandlers{DB: database, Indexer: d.Indexer}
+	chH := &handlers.ChannelsHandlers{DB: database, Indexer: d.Indexer, TGMgr: d.TGMgr}
 	vidH := &handlers.VideosHandlers{Cfg: cfg, DB: database}
 	favH := &handlers.FavoritesHandlers{DB: database, OnAdd: d.OnFavAdd, OnRemove: d.OnFavRemove}
 
@@ -75,6 +75,7 @@ func NewRouter(d Deps) http.Handler {
 			r.Route("/channels", func(r chi.Router) {
 				r.Get("/", chH.List)
 				r.Get("/{id}/videos", chH.ChannelVideos)
+				r.Get("/{id}/live-videos", chH.LiveFetch)
 				r.Post("/{id}/index", chH.EnableIndex)
 				r.Delete("/{id}/index", chH.DisableIndex)
 				r.Post("/{id}/import", chH.Import)
