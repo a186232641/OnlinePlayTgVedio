@@ -1,5 +1,5 @@
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import mpegts from "mpegts.js";
 
@@ -15,9 +15,10 @@ const MEDIA_ERR_LABEL: Record<number, string> = {
   4: "SRC_NOT_SUPPORTED 服务端返回不能识别为视频",
 };
 
-const PLAYLIST_LIMIT = 500;
+const PLAYLIST_PAGE_SIZE = 500;
 
-// playlistRequest builds the upstream URL based on URL params:
+// playlistRequest builds the upstream URL (without offset_id, page-friendly)
+// based on URL params:
 //   ?ch=13                  → channel videos
 //   ?q=foo&ch=13            → search results (optionally channel-scoped)
 //   ?text=...&date_from=... → advanced search filters
@@ -31,11 +32,13 @@ function playlistRequest(p: URLSearchParams): string | null {
   const dateTo = p.get("date_to");
   const fav = p.get("fav");
 
-  if (fav) return "/api/favorites/";
+  const limitQS = `limit=${PLAYLIST_PAGE_SIZE}`;
+
+  if (fav) return `/api/favorites/?${limitQS}`;
 
   const hasSearch = !!(q || text || fileName || dateFrom || dateTo);
   if (hasSearch) {
-    const qs = new URLSearchParams({ limit: String(PLAYLIST_LIMIT) });
+    const qs = new URLSearchParams({ limit: String(PLAYLIST_PAGE_SIZE) });
     if (q) qs.set("q", q);
     if (text) qs.set("text", text);
     if (fileName) qs.set("file_name", fileName);
@@ -45,9 +48,16 @@ function playlistRequest(p: URLSearchParams): string | null {
     return `/api/videos/search?${qs}`;
   }
   if (ch) {
-    return `/api/channels/${ch}/videos?limit=${PLAYLIST_LIMIT}`;
+    return `/api/channels/${ch}/videos?${limitQS}`;
   }
   return null;
+}
+
+// withOffset appends &offset_id=N (or ?offset_id=N) to a URL.
+function withOffset(url: string, offsetID: number): string {
+  if (offsetID <= 0) return url;
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}offset_id=${offsetID}`;
 }
 
 export function Player() {
@@ -102,25 +112,63 @@ export function Player() {
     placeholderData: keepPreviousData,
   });
 
-  // Playlist (siblings from the same context). queryKey only depends on
-  // search-params content,so it doesn't refetch when only the video id changes.
-  const playlist = useQuery<VideosResp>({
+  // Playlist (siblings from the same context). Paginated by tg_msg_id
+  // keyset; loads more as user scrolls the sidebar OR as autoplay walks
+  // toward the bottom of the loaded set.
+  const baseURL = playlistRequest(searchParams);
+  const playlist = useInfiniteQuery<VideosResp>({
     queryKey: ["playlist", playlistKey],
-    enabled: !!playlistRequest(searchParams),
-    queryFn: () => {
-      const url = playlistRequest(searchParams);
-      if (!url) return Promise.resolve({ videos: [] });
-      return api.get<VideosResp>(url);
+    enabled: !!baseURL,
+    initialPageParam: 0,
+    queryFn: ({ pageParam }) => {
+      if (!baseURL) return Promise.resolve({ videos: [] });
+      return api.get<VideosResp>(withOffset(baseURL, pageParam as number));
+    },
+    getNextPageParam: (last) => {
+      if (last.videos.length < PLAYLIST_PAGE_SIZE) return undefined;
+      return last.videos[last.videos.length - 1]?.id;
     },
   });
 
-  const list = playlist.data?.videos ?? [];
+  const list = useMemo<Video[]>(
+    () => playlist.data?.pages.flatMap((p) => p.videos) ?? [],
+    [playlist.data],
+  );
   const currentIdx = useMemo(
     () => list.findIndex((v) => String(v.id) === id),
     [list, id],
   );
   const next = currentIdx >= 0 && currentIdx < list.length - 1 ? list[currentIdx + 1] : null;
   const prev = currentIdx > 0 ? list[currentIdx - 1] : null;
+
+  // Pre-fetch the next page whenever the currently-playing item is within
+  // the last 50 of the loaded set. Lets autoplay keep going past the page
+  // boundary without a stall.
+  useEffect(() => {
+    if (currentIdx < 0 || !playlist.hasNextPage || playlist.isFetchingNextPage) return;
+    if (currentIdx >= list.length - 50) {
+      playlist.fetchNextPage();
+    }
+  }, [currentIdx, list.length, playlist.hasNextPage, playlist.isFetchingNextPage, playlist.fetchNextPage]);
+
+  // IntersectionObserver on the sidebar's bottom sentinel — fetches more
+  // as the user scrolls toward the end of the loaded list.
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = sentinelRef.current;
+    const root = sidebarRef.current;
+    if (!el || !root) return;
+    const obs = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting && playlist.hasNextPage && !playlist.isFetchingNextPage) {
+          playlist.fetchNextPage();
+        }
+      },
+      { root, rootMargin: "200px" },
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [playlist.hasNextPage, playlist.isFetchingNextPage, playlist.fetchNextPage, list.length]);
 
   // Container detection + player setup
   useEffect(() => {
@@ -274,8 +322,9 @@ export function Player() {
         {/* playlist sidebar */}
         {hasPlaylist && (
           <aside ref={sidebarRef} className="lg:w-80 max-h-[85vh] overflow-y-auto bg-slate-900 border-l border-slate-800 shrink-0">
-            <div className="px-3 py-2 text-xs text-slate-400 border-b border-slate-800 sticky top-0 bg-slate-900">
-              播放列表 · {list.length} 条 ({currentIdx + 1}/{list.length})
+            <div className="px-3 py-2 text-xs text-slate-400 border-b border-slate-800 sticky top-0 bg-slate-900 z-10">
+              播放列表 · {currentIdx + 1}/{list.length}
+              {playlist.hasNextPage ? <span className="text-slate-600"> (还有更多)</span> : null}
             </div>
             {list.map((item, i) => {
               const isCurrent = String(item.id) === id;
@@ -304,6 +353,15 @@ export function Player() {
                 </button>
               );
             })}
+            <div ref={sentinelRef} className="py-3 text-center text-xs text-slate-500">
+              {playlist.isFetchingNextPage
+                ? "加载更多…"
+                : playlist.hasNextPage
+                ? <button onClick={() => playlist.fetchNextPage()} className="hover:text-slate-300">加载更多</button>
+                : list.length > 0
+                ? "— 已加载全部 —"
+                : null}
+            </div>
           </aside>
         )}
       </div>
