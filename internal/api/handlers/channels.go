@@ -66,35 +66,72 @@ func (h *ChannelsHandlers) List(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"channels": out})
 }
 
+// videoDTO mirrors the JSON-export field names (snake_case) so frontend can
+// consume them without translation.
 type videoDTO struct {
-	ID          int64  `json:"id"`
-	ChannelID   int64  `json:"channel_id"`
-	Caption     string `json:"caption"`
-	DurationSec int    `json:"duration_sec"`
-	Width       int    `json:"width"`
-	Height      int    `json:"height"`
-	SizeBytes   int64  `json:"size_bytes"`
-	Mime        string `json:"mime"`
-	SentAt      string `json:"sent_at,omitempty"`
-	StreamURL   string `json:"stream_url"`
+	ID              int64  `json:"id"`
+	ChannelID       int64  `json:"channel_id"`
+	TGMsgID         int64  `json:"tg_msg_id"`
+	Date            string `json:"date,omitempty"`
+	FromName        string `json:"from,omitempty"`
+	FromID          string `json:"from_id,omitempty"`
+	FileName        string `json:"file_name,omitempty"`
+	FileSize        int64  `json:"file_size"`
+	MediaType       string `json:"media_type,omitempty"`
+	MimeType        string `json:"mime_type,omitempty"`
+	DurationSeconds int    `json:"duration_seconds"`
+	Width           int    `json:"width"`
+	Height          int    `json:"height"`
+	Text            string `json:"text"`
+	StreamURL       string `json:"stream_url"`
 }
 
 func videoToDTO(v db.Video) videoDTO {
 	d := videoDTO{
-		ID:          v.ID,
-		ChannelID:   v.ChannelID,
-		Caption:     v.Caption,
-		DurationSec: v.DurationSec,
-		Width:       v.Width,
-		Height:      v.Height,
-		SizeBytes:   v.SizeBytes,
-		Mime:        v.Mime,
-		StreamURL:   "/api/videos/" + strconv.FormatInt(v.ID, 10) + "/stream",
+		ID:              v.ID,
+		ChannelID:       v.ChannelID,
+		TGMsgID:         v.TGMsgID,
+		FromName:        v.FromName,
+		FromID:          v.FromID,
+		FileName:        v.FileName,
+		FileSize:        v.FileSize,
+		MediaType:       v.MediaType,
+		MimeType:        v.MimeType,
+		DurationSeconds: v.DurationSeconds,
+		Width:           v.Width,
+		Height:          v.Height,
+		Text:            v.Text,
+		StreamURL:       "/api/videos/" + strconv.FormatInt(v.ID, 10) + "/stream",
 	}
-	if v.SentAt != nil {
-		d.SentAt = v.SentAt.Format("2006-01-02T15:04:05Z07:00")
+	if v.Date != nil {
+		d.Date = v.Date.Format("2006-01-02T15:04:05Z07:00")
 	}
 	return d
+}
+
+// ClearVideos removes every video row for a channel. Used before a fresh
+// JSON import to drop stale data (and any orphan rows from earlier indexer
+// experiments). Favorites cascade automatically.
+//
+// DELETE /api/channels/:id/videos
+func (h *ChannelsHandlers) ClearVideos(w http.ResponseWriter, r *http.Request) {
+	uid, _ := web.UserIDFromContext(r.Context())
+	cid, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		httpx.WriteError(w, httpx.Errorf(http.StatusBadRequest, "bad_id", "invalid channel id"))
+		return
+	}
+	if _, err := h.DB.ChannelByID(r.Context(), cid, uid); err != nil {
+		httpx.WriteError(w, httpx.Errorf(http.StatusNotFound, "not_found", "channel not found"))
+		return
+	}
+	n, err := h.DB.DeleteVideosByChannel(r.Context(), uid, cid)
+	if err != nil {
+		httpx.WriteError(w, err)
+		return
+	}
+	_ = h.DB.MarkChannelIndexed(r.Context(), cid, 0)
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": n})
 }
 
 func (h *ChannelsHandlers) ChannelVideos(w http.ResponseWriter, r *http.Request) {

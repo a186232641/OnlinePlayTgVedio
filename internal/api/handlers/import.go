@@ -25,19 +25,26 @@ type tdExport struct {
 }
 
 type tdMessage struct {
-	ID           int             `json:"id"`
-	Type         string          `json:"type"`
-	Date         string          `json:"date"`
-	DateUnix     string          `json:"date_unixtime"`
-	MediaType    string          `json:"media_type"`
-	File         string          `json:"file"`
-	FileSize     json.RawMessage `json:"file_size"` // can be number or quoted string
-	MimeType     string          `json:"mime_type"`
-	Duration     int             `json:"duration_seconds"`
-	Width        int             `json:"width"`
-	Height      int             `json:"height"`
-	Text         json.RawMessage `json:"text"` // string OR array of fragments
-	ForumTopicID int             `json:"forum_topic_id"`
+	ID                int             `json:"id"`
+	Type              string          `json:"type"`
+	Date              string          `json:"date"`
+	DateUnix          string          `json:"date_unixtime"`
+	Edited            string          `json:"edited"`
+	EditedUnix        string          `json:"edited_unixtime"`
+	From              string          `json:"from"`
+	FromID            string          `json:"from_id"`
+	File              string          `json:"file"`
+	FileName          string          `json:"file_name"`
+	FileSize          json.RawMessage `json:"file_size"` // number or quoted string
+	Thumbnail         string          `json:"thumbnail"`
+	ThumbnailFileSize json.RawMessage `json:"thumbnail_file_size"`
+	MediaType         string          `json:"media_type"`
+	MimeType          string          `json:"mime_type"`
+	Duration          int             `json:"duration_seconds"`
+	Width             int             `json:"width"`
+	Height            int             `json:"height"`
+	Text              json.RawMessage `json:"text"`          // string OR array of fragments
+	TextEntities      json.RawMessage `json:"text_entities"` // raw, kept as JSONB
 }
 
 // parseFileSize handles both bare number ("file_size":12345) and quoted
@@ -91,28 +98,42 @@ func captionFromText(raw json.RawMessage) string {
 	return b.String()
 }
 
-func (m *tdMessage) sentAt() *time.Time {
-	if m.DateUnix != "" {
-		if n, err := strconv.ParseInt(m.DateUnix, 10, 64); err == nil {
+func parseTime(unixStr, isoStr string) *time.Time {
+	if unixStr != "" {
+		if n, err := strconv.ParseInt(unixStr, 10, 64); err == nil {
 			t := time.Unix(n, 0).UTC()
 			return &t
 		}
 	}
-	if m.Date != "" {
-		if t, err := time.Parse("2006-01-02T15:04:05", m.Date); err == nil {
+	if isoStr != "" {
+		if t, err := time.Parse("2006-01-02T15:04:05", isoStr); err == nil {
 			return &t
 		}
 	}
 	return nil
 }
 
+// videoExts: extensions we treat as video when TG Desktop didn't write a
+// media_type or mime (rare but happens, especially for forwarded files).
+var videoExts = []string{".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".flv", ".ts", ".mpeg", ".mpg", ".3gp"}
+
 func (m *tdMessage) isVideo() bool {
 	switch m.MediaType {
-	case "video_file", "video_message":
+	case "video_file", "video_message", "animation":
+		// animation = TG's "GIF" container,实际就是无音轨 mp4,大量频道
+		// 把短视频发成 animation
 		return true
 	}
 	if strings.HasPrefix(strings.ToLower(m.MimeType), "video/") {
 		return true
+	}
+	// Last-resort: file extension on .file path. Many large channels post
+	// videos as plain documents without media_type set.
+	low := strings.ToLower(m.File)
+	for _, ext := range videoExts {
+		if strings.HasSuffix(low, ext) {
+			return true
+		}
 	}
 	return false
 }
@@ -164,26 +185,48 @@ func (h *ChannelsHandlers) Import(w http.ResponseWriter, r *http.Request) {
 	}
 
 	imported, skipped := 0, 0
+	skipBy := map[string]int{} // media_type → count, helps user see what's missing
 	emptyRef := []byte{}
 	for _, m := range exp.Messages {
 		if m.Type != "message" || !m.isVideo() {
 			skipped++
+			key := m.MediaType
+			if key == "" {
+				if m.Type != "message" {
+					key = "service/" + m.Type
+				} else {
+					key = "(no media)"
+				}
+			}
+			skipBy[key]++
 			continue
 		}
 		v := &db.Video{
-			UserID:        uid,
-			ChannelID:     cid,
-			TGMessageID:   int64(m.ID),
-			TGDocID:       0, // resolved on first play
+			UserID:    uid,
+			ChannelID: cid,
+
+			TGMsgID:           int64(m.ID),
+			MsgType:           m.Type,
+			Date:              parseTime(m.DateUnix, m.Date),
+			Edited:            parseTime(m.EditedUnix, m.Edited),
+			FromName:          m.From,
+			FromID:            m.FromID,
+			File:              m.File,
+			FileName:          m.FileName,
+			FileSize:          parseFileSize(m.FileSize),
+			Thumbnail:         m.Thumbnail,
+			ThumbnailFileSize: parseFileSize(m.ThumbnailFileSize),
+			MediaType:         m.MediaType,
+			MimeType:          m.MimeType,
+			DurationSeconds:   m.Duration,
+			Width:             m.Width,
+			Height:            m.Height,
+			Text:              captionFromText(m.Text),
+			TextEntities:      m.TextEntities,
+
+			TGDocID:       0,
 			AccessHash:    0,
 			FileReference: emptyRef,
-			Mime:          m.MimeType,
-			SizeBytes:     parseFileSize(m.FileSize),
-			DurationSec:   m.Duration,
-			Width:         m.Width,
-			Height:        m.Height,
-			Caption:       captionFromText(m.Text),
-			SentAt:        m.sentAt(),
 		}
 		if _, err := h.DB.UpsertVideo(r.Context(), v); err != nil {
 			httpx.WriteError(w, fmt.Errorf("upsert video msg=%d: %w", m.ID, err))
@@ -198,10 +241,11 @@ func (h *ChannelsHandlers) Import(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"ok":       true,
-		"imported": imported,
-		"skipped":  skipped,
-		"total":    len(exp.Messages),
+		"ok":         true,
+		"imported":   imported,
+		"skipped":    skipped,
+		"total":      len(exp.Messages),
+		"skip_by":    skipBy, // breakdown so user sees if something useful was filtered
 	})
 }
 

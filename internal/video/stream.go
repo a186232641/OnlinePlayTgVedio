@@ -81,13 +81,13 @@ func (s *StreamServer) serveFromTelegram(w http.ResponseWriter, r *http.Request,
 	// the locator on first play by hitting channels.getMessages.
 	if v.TGDocID == 0 || len(v.FileReference) == 0 {
 		if err := RefreshFileReference(r.Context(), s.DB, s.TG, v); err != nil {
-			slog.Warn("stream resolve failed", "video_id", v.ID, "tg_message_id", v.TGMessageID, "err", err)
+			slog.Warn("stream resolve failed", "video_id", v.ID, "tg_msg_id", v.TGMsgID, "err", err)
 			httpx.WriteError(w, httpx.Errorf(http.StatusBadGateway, "tg_resolve", err.Error()))
 			return
 		}
 	}
 
-	mime := v.Mime
+	mime := v.MimeType
 	if mime == "" {
 		mime = "video/mp4"
 	}
@@ -97,7 +97,7 @@ func (s *StreamServer) serveFromTelegram(w http.ResponseWriter, r *http.Request,
 	// videos uploaded by 3rd-party clients lack it). Browsers can still
 	// progressively play but lose seek; we ignore any Range header and stream
 	// from 0 until TG returns an empty chunk (EOF).
-	if v.SizeBytes <= 0 {
+	if v.FileSize <= 0 {
 		w.WriteHeader(http.StatusOK)
 		if r.Method == http.MethodHead {
 			return
@@ -110,9 +110,9 @@ func (s *StreamServer) serveFromTelegram(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	start, end, ok := parseRange(r.Header.Get("Range"), v.SizeBytes)
+	start, end, ok := parseRange(r.Header.Get("Range"), v.FileSize)
 	if !ok {
-		w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(v.SizeBytes, 10))
+		w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(v.FileSize, 10))
 		httpx.WriteError(w, httpx.Errorf(http.StatusRequestedRangeNotSatisfiable, "bad_range", "invalid Range header"))
 		return
 	}
@@ -123,7 +123,7 @@ func (s *StreamServer) serveFromTelegram(w http.ResponseWriter, r *http.Request,
 
 	status := http.StatusOK
 	if r.Header.Get("Range") != "" {
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, v.SizeBytes))
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, v.FileSize))
 		status = http.StatusPartialContent
 	}
 	w.WriteHeader(status)

@@ -4,7 +4,13 @@ import { useRef, useState } from "react";
 
 import { api, Channel } from "../api/client";
 
-interface ImportResp { ok: boolean; imported: number; skipped: number; total: number; }
+interface ImportResp {
+  ok: boolean;
+  imported: number;
+  skipped: number;
+  total: number;
+  skip_by?: Record<string, number>;
+}
 
 async function uploadJsonImport(channelId: number, file: File): Promise<ImportResp> {
   const fd = new FormData();
@@ -21,6 +27,20 @@ async function uploadJsonImport(channelId: number, file: File): Promise<ImportRe
   return payload as ImportResp;
 }
 
+function formatImportResult(r: ImportResp): string {
+  let s = `导入完成: 写入 ${r.imported} 条视频\n总消息数 ${r.total},跳过 ${r.skipped} 条非视频消息`;
+  if (r.skip_by && Object.keys(r.skip_by).length > 0) {
+    const top = Object.entries(r.skip_by)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([k, v]) => `  ${k || "(空)"}: ${v}`)
+      .join("\n");
+    s += `\n\n跳过类型分布(前 8):\n${top}`;
+  }
+  s += `\n\n首次播放时会从 TG 现取 file_reference,稍慢一点。`;
+  return s;
+}
+
 export function SessionChannels() {
   const { id } = useParams<{ id: string }>();
   const sessionId = Number(id);
@@ -35,10 +55,21 @@ export function SessionChannels() {
   const importJson = useMutation({
     mutationFn: ({ cid, file }: { cid: number; file: File }) => uploadJsonImport(cid, file),
     onSettled: () => qc.invalidateQueries({ queryKey: ["channels"] }),
-    onSuccess: (resp) => {
-      alert(`导入完成: 写入 ${resp.imported} 条视频,跳过 ${resp.skipped} 条非视频消息(总 ${resp.total})。\n\n首次播放时会从 TG 现取 file_reference,稍慢一点。`);
-    },
+    onSuccess: (resp) => alert(formatImportResult(resp)),
     onError: (err: Error) => alert(`导入失败: ${err.message}`),
+  });
+  const clearChannel = useMutation({
+    mutationFn: async (cid: number) => {
+      const res = await fetch(`/api/channels/${cid}/videos`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (!res.ok) throw new Error(`清空失败 (${res.status})`);
+      return res.json();
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ["channels"] }),
+    onSuccess: (resp: { deleted: number }) => alert(`已清空 ${resp.deleted} 条视频`),
+    onError: (err: Error) => alert(`清空失败: ${err.message}`),
   });
 
   const list = q.data?.channels ?? [];
@@ -76,7 +107,13 @@ export function SessionChannels() {
             key={c.id}
             c={c}
             onImport={(file) => importJson.mutate({ cid: c.id, file })}
+            onClear={() => {
+              if (confirm(`清空 ${c.title} 的所有视频(${c.video_count} 条)?\n\n收藏会一并删除。常用于"重置后重新导入"。`)) {
+                clearChannel.mutate(c.id);
+              }
+            }}
             importing={importJson.isPending && importJson.variables?.cid === c.id}
+            clearing={clearChannel.isPending && clearChannel.variables === c.id}
           />
         ))}
       </div>
@@ -85,11 +122,13 @@ export function SessionChannels() {
 }
 
 function ChannelRow({
-  c, onImport, importing,
+  c, onImport, onClear, importing, clearing,
 }: {
   c: Channel;
   onImport: (file: File) => void;
+  onClear: () => void;
   importing: boolean;
+  clearing: boolean;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -113,10 +152,18 @@ function ChannelRow({
       />
       <button
         onClick={() => fileInputRef.current?.click()}
-        disabled={importing}
+        disabled={importing || clearing}
         className="px-3 py-1 text-xs bg-sky-800 hover:bg-sky-700 disabled:opacity-50 rounded"
         title="上传 TG Desktop 导出的 result.json"
       >{importing ? "上传中…" : "导入 JSON"}</button>
+      {c.video_count > 0 && (
+        <button
+          onClick={onClear}
+          disabled={importing || clearing}
+          className="px-2 py-1 text-xs bg-slate-700 hover:bg-red-700 disabled:opacity-50 rounded"
+          title="清空该频道所有视频(用于重新导入)"
+        >{clearing ? "清空中…" : "清空"}</button>
+      )}
     </div>
   );
 }

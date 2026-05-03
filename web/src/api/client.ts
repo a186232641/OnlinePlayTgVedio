@@ -49,16 +49,22 @@ export interface Channel {
   last_indexed_at?: string;
 }
 
+// Video field names mirror TG Desktop's JSON export (snake_case as-is).
 export interface Video {
   id: number;
   channel_id: number;
-  caption: string;
-  duration_sec: number;
+  tg_msg_id: number;
+  date?: string;
+  from?: string;
+  from_id?: string;
+  file_name?: string;
+  file_size: number;
+  media_type?: string;
+  mime_type?: string;
+  duration_seconds: number;
   width: number;
   height: number;
-  size_bytes: number;
-  mime: string;
-  sent_at?: string;
+  text: string;
   stream_url: string;
 }
 

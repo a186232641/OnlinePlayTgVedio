@@ -8,10 +8,29 @@ interface Page { videos: Video[] }
 
 const PAGE_SIZE = 200;
 
+interface Filters {
+  text: string;
+  fileName: string;
+  dateFrom: string; // yyyy-mm-dd
+  dateTo: string;
+  channelID: number;
+}
+
+const emptyFilters: Filters = {
+  text: "",
+  fileName: "",
+  dateFrom: "",
+  dateTo: "",
+  channelID: 0,
+};
+
+function hasAny(f: Filters): boolean {
+  return !!(f.text || f.fileName || f.dateFrom || f.dateTo);
+}
+
 export function Search() {
-  const [q, setQ] = useState("");
-  const [submitted, setSubmitted] = useState("");
-  const [channelID, setChannelID] = useState<number>(0);
+  const [draft, setDraft] = useState<Filters>(emptyFilters);
+  const [submitted, setSubmitted] = useState<Filters>(emptyFilters);
 
   const channels = useQuery<{ channels: Channel[] }>({
     queryKey: ["channels", "all"],
@@ -19,17 +38,18 @@ export function Search() {
   });
 
   const result = useInfiniteQuery<Page>({
-    queryKey: ["search", submitted, channelID],
-    enabled: submitted.length > 0,
+    queryKey: ["search", submitted],
+    enabled: hasAny(submitted),
     initialPageParam: 0,
     queryFn: async ({ pageParam }) => {
       const cursor = pageParam as number;
-      const qs = new URLSearchParams({
-        q: submitted,
-        limit: String(PAGE_SIZE),
-      });
+      const qs = new URLSearchParams({ limit: String(PAGE_SIZE) });
+      if (submitted.text) qs.set("text", submitted.text);
+      if (submitted.fileName) qs.set("file_name", submitted.fileName);
+      if (submitted.dateFrom) qs.set("date_from", submitted.dateFrom);
+      if (submitted.dateTo) qs.set("date_to", submitted.dateTo);
+      if (submitted.channelID > 0) qs.set("channel_id", String(submitted.channelID));
       if (cursor > 0) qs.set("offset_id", String(cursor));
-      if (channelID > 0) qs.set("channel_id", String(channelID));
       return api.get<Page>(`/api/videos/search?${qs}`);
     },
     getNextPageParam: (last) => {
@@ -46,43 +66,74 @@ export function Search() {
   return (
     <div>
       <form
-        onSubmit={(e) => { e.preventDefault(); setSubmitted(q.trim()); }}
-        className="p-4 border-b border-slate-800 flex gap-2 items-center"
+        onSubmit={(e) => { e.preventDefault(); setSubmitted({ ...draft }); }}
+        className="p-4 border-b border-slate-800 grid gap-2 sm:grid-cols-2 lg:grid-cols-5"
       >
         <input
-          className="flex-1 px-3 py-2 bg-slate-800 rounded"
-          placeholder="搜索视频说明 (支持中文)…"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
+          className="px-3 py-2 bg-slate-800 rounded text-sm sm:col-span-2"
+          placeholder="文件名(file_name)…"
+          value={draft.fileName}
+          onChange={(e) => setDraft({ ...draft, fileName: e.target.value })}
+        />
+        <input
+          className="px-3 py-2 bg-slate-800 rounded text-sm sm:col-span-2"
+          placeholder="正文 / caption (text)…"
+          value={draft.text}
+          onChange={(e) => setDraft({ ...draft, text: e.target.value })}
         />
         <select
           className="px-3 py-2 bg-slate-800 rounded text-sm"
-          value={channelID}
-          onChange={(e) => setChannelID(Number(e.target.value))}
+          value={draft.channelID}
+          onChange={(e) => setDraft({ ...draft, channelID: Number(e.target.value) })}
         >
           <option value={0}>全部频道</option>
           {(channels.data?.channels ?? [])
             .filter((c) => c.video_count > 0)
             .map((c) => (
-              <option key={c.id} value={c.id}>{c.title} ({c.video_count})</option>
+              <option key={c.id} value={c.id}>{c.title}</option>
             ))}
         </select>
-        <button className="px-4 py-2 bg-emerald-700 hover:bg-emerald-600 rounded">搜索</button>
+        <label className="flex items-center gap-2 text-xs text-slate-400">
+          起始
+          <input
+            type="date"
+            className="flex-1 px-2 py-1.5 bg-slate-800 rounded text-sm"
+            value={draft.dateFrom}
+            onChange={(e) => setDraft({ ...draft, dateFrom: e.target.value })}
+          />
+        </label>
+        <label className="flex items-center gap-2 text-xs text-slate-400">
+          结束
+          <input
+            type="date"
+            className="flex-1 px-2 py-1.5 bg-slate-800 rounded text-sm"
+            value={draft.dateTo}
+            onChange={(e) => setDraft({ ...draft, dateTo: e.target.value })}
+          />
+        </label>
+        <div className="sm:col-span-2 lg:col-span-1 flex gap-2">
+          <button className="flex-1 px-4 py-2 bg-emerald-700 hover:bg-emerald-600 rounded text-sm">搜索</button>
+          <button
+            type="button"
+            onClick={() => { setDraft(emptyFilters); setSubmitted(emptyFilters); }}
+            className="px-3 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm"
+          >清空</button>
+        </div>
       </form>
 
-      {!submitted && (
-        <div className="p-6 text-slate-400 text-sm">输入关键字后回车,在 caption 里全字符匹配。</div>
+      {!hasAny(submitted) && (
+        <div className="p-6 text-slate-400 text-sm">
+          支持任一组合: 文件名 / 正文 / 日期范围 / 频道。每个字段都是 ILIKE 模糊匹配。
+        </div>
       )}
 
-      {submitted && result.isLoading && (
+      {hasAny(submitted) && result.isLoading && (
         <div className="p-6 text-slate-400">搜索中…</div>
       )}
 
-      {submitted && result.data && (
+      {hasAny(submitted) && result.data && (
         <>
-          <div className="px-6 pt-4 text-xs text-slate-500">
-            "{submitted}" 命中 {all.length} 条{channelID > 0 ? "(单频道)" : ""}
-          </div>
+          <div className="px-6 pt-4 text-xs text-slate-500">命中 {all.length} 条</div>
           <VideoGrid videos={all} />
           <div className="py-6 flex items-center justify-center">
             {result.hasNextPage ? (

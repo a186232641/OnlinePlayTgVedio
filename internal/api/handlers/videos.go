@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -55,13 +56,13 @@ func (h *VideosHandlers) Thumb(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.Errorf(http.StatusNotFound, "not_found", "video not found"))
 		return
 	}
-	if v.ThumbPath == "" {
+	if v.Thumbnail == "" {
 		httpx.WriteError(w, httpx.Errorf(http.StatusNotFound, "no_thumb", "no thumbnail available"))
 		return
 	}
-	// Prevent traversal: thumb path is repo-controlled (set by indexer), but
+	// Prevent traversal: thumbnail path is repo-controlled (set by indexer), but
 	// be defensive.
-	clean := filepath.Clean(v.ThumbPath)
+	clean := filepath.Clean(v.Thumbnail)
 	if strings.HasPrefix(clean, "..") || strings.ContainsRune(clean, ':') {
 		httpx.WriteError(w, httpx.Errorf(http.StatusBadRequest, "bad_path", "invalid thumb path"))
 		return
@@ -72,19 +73,41 @@ func (h *VideosHandlers) Thumb(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, abs)
 }
 
+// Search supports any subset of these query params:
+//
+//	text         ILIKE %text% on `text` column
+//	file_name    ILIKE %file_name% on `file_name` column
+//	date_from    YYYY-MM-DD,inclusive lower bound
+//	date_to      YYYY-MM-DD,inclusive upper bound (treated as end-of-day)
+//	channel_id   restrict to one channel
+//	limit, offset_id   keyset pagination (newest first)
 func (h *VideosHandlers) Search(w http.ResponseWriter, r *http.Request) {
 	uid, _ := web.UserIDFromContext(r.Context())
-	q := strings.TrimSpace(r.URL.Query().Get("q"))
-	if q == "" {
+	qv := r.URL.Query()
+	text := strings.TrimSpace(qv.Get("text"))
+	if text == "" {
+		// backwards-compat: ?q= used to mean text
+		text = strings.TrimSpace(qv.Get("q"))
+	}
+	fileName := strings.TrimSpace(qv.Get("file_name"))
+	dateFrom := parseDateOnly(qv.Get("date_from"), false)
+	dateTo := parseDateOnly(qv.Get("date_to"), true)
+
+	if text == "" && fileName == "" && dateFrom == nil && dateTo == nil {
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{"videos": []videoDTO{}})
 		return
 	}
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	offsetID, _ := strconv.ParseInt(r.URL.Query().Get("offset_id"), 10, 64)
-	channelID, _ := strconv.ParseInt(r.URL.Query().Get("channel_id"), 10, 64)
+
+	limit, _ := strconv.Atoi(qv.Get("limit"))
+	offsetID, _ := strconv.ParseInt(qv.Get("offset_id"), 10, 64)
+	channelID, _ := strconv.ParseInt(qv.Get("channel_id"), 10, 64)
+
 	vids, err := h.DB.SearchVideos(r.Context(), db.SearchVideosOpts{
 		UserID:    uid,
-		Query:     q,
+		Text:      text,
+		FileName:  fileName,
+		DateFrom:  dateFrom,
+		DateTo:    dateTo,
 		ChannelID: channelID,
 		Limit:     limit,
 		OffsetID:  offsetID,
@@ -98,4 +121,19 @@ func (h *VideosHandlers) Search(w http.ResponseWriter, r *http.Request) {
 		out = append(out, videoToDTO(v))
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"videos": out})
+}
+
+func parseDateOnly(s string, endOfDay bool) *time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return nil
+	}
+	if endOfDay {
+		t = t.Add(24*time.Hour - time.Second)
+	}
+	return &t
 }

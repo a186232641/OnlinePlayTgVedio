@@ -126,7 +126,7 @@ func (m *Manager) MaybeTee(ctx context.Context, v *db.Video, start int64) (io.Wr
 		// Only promote a fully-finished tee — but we don't know full size in
 		// this path. Treat as complete only when written bytes equal the
 		// recorded video size.
-		if st.Size() != v.SizeBytes {
+		if st.Size() != v.FileSize {
 			_ = os.Remove(tmpPath)
 			return
 		}
@@ -264,11 +264,15 @@ func (m *Manager) downloadFavorite(ctx context.Context, videoID int64) error {
 
 func (m *Manager) lookupVideoForDownload(ctx context.Context, videoID int64) (*db.Video, error) {
 	row := m.db.QueryRow(ctx, `
-        SELECT id, user_id, channel_id, tg_message_id, tg_doc_id, access_hash, file_reference, COALESCE(mime,''), size_bytes
+        SELECT id, user_id, channel_id, tg_msg_id,
+               COALESCE(tg_doc_id, 0), COALESCE(access_hash, 0), file_reference,
+               COALESCE(mime_type, ''), COALESCE(file_size, 0)
         FROM videos WHERE id=$1
     `, videoID)
 	v := &db.Video{}
-	if err := row.Scan(&v.ID, &v.UserID, &v.ChannelID, &v.TGMessageID, &v.TGDocID, &v.AccessHash, &v.FileReference, &v.Mime, &v.SizeBytes); err != nil {
+	if err := row.Scan(&v.ID, &v.UserID, &v.ChannelID, &v.TGMsgID,
+		&v.TGDocID, &v.AccessHash, &v.FileReference,
+		&v.MimeType, &v.FileSize); err != nil {
 		return nil, err
 	}
 	return v, nil

@@ -28,9 +28,8 @@ function fmtDate(s?: string) {
   return s.slice(0, 10);
 }
 
-// Pure-text video card. We used to render thumbnails synced from Telegram,
-// but the simplified app reads everything from JSON imports which don't
-// include thumbnail bytes — so the card is caption-led with metadata chips.
+// Pure-text card with file_name as the headline (caption second, since TG
+// Desktop captions are often empty / hashtag-only).
 export function VideoGrid({ videos }: { videos: Video[] }) {
   if (videos.length === 0) return <div className="p-6 text-slate-400">暂无视频</div>;
   return (
@@ -39,16 +38,19 @@ export function VideoGrid({ videos }: { videos: Video[] }) {
         <Link
           key={v.id}
           to={`/videos/${v.id}`}
-          className="group p-3 rounded bg-slate-900 border border-slate-800 hover:border-emerald-700 flex flex-col gap-2 min-h-[100px]"
+          className="group p-3 rounded bg-slate-900 border border-slate-800 hover:border-emerald-700 flex flex-col gap-2 min-h-[110px]"
         >
-          <div className="text-sm leading-snug line-clamp-3 group-hover:text-emerald-300">
-            {v.caption?.trim() || <span className="text-slate-500">视频 #{v.id}</span>}
+          <div className="text-sm font-medium leading-snug line-clamp-2 break-all group-hover:text-emerald-300">
+            {v.file_name?.trim() || v.text?.trim() || <span className="text-slate-500">视频 #{v.id}</span>}
           </div>
+          {v.file_name && v.text && (
+            <div className="text-xs text-slate-400 line-clamp-2">{v.text}</div>
+          )}
           <div className="mt-auto flex items-center gap-2 text-xs text-slate-500 flex-wrap">
-            <span className="px-1.5 py-0.5 bg-slate-800 rounded">{fmtDuration(v.duration_sec)}</span>
-            {v.size_bytes > 0 && <span>{fmtSize(v.size_bytes)}</span>}
+            <span className="px-1.5 py-0.5 bg-slate-800 rounded">{fmtDuration(v.duration_seconds)}</span>
+            {v.file_size > 0 && <span>{fmtSize(v.file_size)}</span>}
             {v.width > 0 && <span>{v.width}×{v.height}</span>}
-            {v.sent_at && <span className="ml-auto">{fmtDate(v.sent_at)}</span>}
+            {v.date && <span className="ml-auto">{fmtDate(v.date)}</span>}
           </div>
         </Link>
       ))}

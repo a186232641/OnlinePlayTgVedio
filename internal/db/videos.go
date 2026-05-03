@@ -3,52 +3,128 @@ package db
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 )
 
+// Video mirrors a TG Desktop JSON message (see migration 0003 for column docs)
+// plus three lazily-resolved fields needed for streaming (TGDocID / AccessHash
+// / FileReference).
 type Video struct {
-	ID            int64
-	UserID        int64
-	ChannelID     int64
-	TGMessageID   int64
+	ID        int64
+	UserID    int64
+	ChannelID int64
+
+	// Mirror of JSON fields (snake_case → CamelCase by Go convention)
+	TGMsgID           int64
+	MsgType           string
+	Date              *time.Time
+	Edited            *time.Time
+	FromName          string
+	FromID            string
+	File              string
+	FileName          string
+	FileSize          int64
+	Thumbnail         string
+	ThumbnailFileSize int64
+	MediaType         string
+	MimeType          string
+	DurationSeconds   int
+	Width             int
+	Height            int
+	Text              string
+	TextEntities      []byte // raw JSON; nil = none
+
+	// Streaming locator (lazy-filled on first play)
 	TGDocID       int64
 	AccessHash    int64
 	FileReference []byte
-	Mime          string
-	SizeBytes     int64
-	DurationSec   int
-	Width         int
-	Height        int
-	Caption       string
-	SentAt        *time.Time
-	ThumbPath     string
 }
 
+const videoCols = `
+    id, user_id, channel_id,
+    tg_msg_id, COALESCE(msg_type, ''),
+    date, edited,
+    COALESCE(from_name, ''), COALESCE(from_id, ''),
+    COALESCE(file, ''), COALESCE(file_name, ''), COALESCE(file_size, 0),
+    COALESCE(thumbnail, ''), COALESCE(thumbnail_file_size, 0),
+    COALESCE(media_type, ''), COALESCE(mime_type, ''),
+    COALESCE(duration_seconds, 0), COALESCE(width, 0), COALESCE(height, 0),
+    COALESCE(text, ''), text_entities,
+    COALESCE(tg_doc_id, 0), COALESCE(access_hash, 0), file_reference
+`
+
+func scanVideo(row pgx.Row) (*Video, error) {
+	v := &Video{}
+	if err := row.Scan(
+		&v.ID, &v.UserID, &v.ChannelID,
+		&v.TGMsgID, &v.MsgType,
+		&v.Date, &v.Edited,
+		&v.FromName, &v.FromID,
+		&v.File, &v.FileName, &v.FileSize,
+		&v.Thumbnail, &v.ThumbnailFileSize,
+		&v.MediaType, &v.MimeType,
+		&v.DurationSeconds, &v.Width, &v.Height,
+		&v.Text, &v.TextEntities,
+		&v.TGDocID, &v.AccessHash, &v.FileReference,
+	); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+// UpsertVideo writes a row from JSON import (idempotent on tg_msg_id).
 func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
 	row := d.QueryRow(ctx, `
         INSERT INTO videos (
-            user_id, channel_id, tg_message_id, tg_doc_id, access_hash, file_reference,
-            mime, size_bytes, duration_sec, width, height, caption, sent_at, thumb_path
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-        ON CONFLICT (user_id, channel_id, tg_message_id) DO UPDATE SET
-            tg_doc_id      = EXCLUDED.tg_doc_id,
-            access_hash    = EXCLUDED.access_hash,
-            file_reference = EXCLUDED.file_reference,
-            mime           = EXCLUDED.mime,
-            size_bytes     = EXCLUDED.size_bytes,
-            duration_sec   = EXCLUDED.duration_sec,
-            width          = EXCLUDED.width,
-            height         = EXCLUDED.height,
-            caption        = EXCLUDED.caption,
-            sent_at        = EXCLUDED.sent_at,
-            thumb_path     = COALESCE(NULLIF(EXCLUDED.thumb_path,''), videos.thumb_path)
+            user_id, channel_id,
+            tg_msg_id, msg_type, date, edited,
+            from_name, from_id,
+            file, file_name, file_size,
+            thumbnail, thumbnail_file_size,
+            media_type, mime_type,
+            duration_seconds, width, height,
+            text, text_entities
+        ) VALUES (
+            $1,$2,
+            $3,$4,$5,$6,
+            $7,$8,
+            $9,$10,$11,
+            $12,$13,
+            $14,$15,
+            $16,$17,$18,
+            $19,$20
+        )
+        ON CONFLICT (user_id, channel_id, tg_msg_id) DO UPDATE SET
+            msg_type            = EXCLUDED.msg_type,
+            date                = EXCLUDED.date,
+            edited              = EXCLUDED.edited,
+            from_name           = EXCLUDED.from_name,
+            from_id             = EXCLUDED.from_id,
+            file                = EXCLUDED.file,
+            file_name           = EXCLUDED.file_name,
+            file_size           = EXCLUDED.file_size,
+            thumbnail           = EXCLUDED.thumbnail,
+            thumbnail_file_size = EXCLUDED.thumbnail_file_size,
+            media_type          = EXCLUDED.media_type,
+            mime_type           = EXCLUDED.mime_type,
+            duration_seconds    = EXCLUDED.duration_seconds,
+            width               = EXCLUDED.width,
+            height              = EXCLUDED.height,
+            text                = EXCLUDED.text,
+            text_entities       = EXCLUDED.text_entities
         RETURNING id
     `,
-		v.UserID, v.ChannelID, v.TGMessageID, v.TGDocID, v.AccessHash, v.FileReference,
-		nilIfEmpty(v.Mime), v.SizeBytes, v.DurationSec, v.Width, v.Height,
-		nilIfEmpty(v.Caption), v.SentAt, nilIfEmpty(v.ThumbPath),
+		v.UserID, v.ChannelID,
+		v.TGMsgID, nilIfEmpty(v.MsgType), v.Date, v.Edited,
+		nilIfEmpty(v.FromName), nilIfEmpty(v.FromID),
+		nilIfEmpty(v.File), nilIfEmpty(v.FileName), v.FileSize,
+		nilIfEmpty(v.Thumbnail), v.ThumbnailFileSize,
+		nilIfEmpty(v.MediaType), nilIfEmpty(v.MimeType),
+		v.DurationSeconds, v.Width, v.Height,
+		nilIfEmpty(v.Text), v.TextEntities,
 	)
 	var id int64
 	if err := row.Scan(&id); err != nil {
@@ -57,30 +133,18 @@ func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
 	return id, nil
 }
 
-func (d *DB) UpdateVideoFileReference(ctx context.Context, id int64, fr []byte) error {
-	_, err := d.Exec(ctx, `UPDATE videos SET file_reference=$1 WHERE id=$2`, fr, id)
-	return err
-}
-
-// UpdateVideoLocator persists the full Telegram doc locator. Used after
-// JSON-imported placeholder rows get their first refresh, populating
-// tg_doc_id + access_hash + file_reference together. size > 0 also persists
-// size_bytes; mime != "" persists mime.
-func (d *DB) UpdateVideoLocator(ctx context.Context, id int64, tgDocID, accessHash int64, fr []byte, size int64, mime string) error {
+// UpdateVideoLocator persists the TG streaming locator after first refresh.
+// FileSize is overwritten only when newSize > 0; same for mime_type.
+func (d *DB) UpdateVideoLocator(ctx context.Context, id int64, tgDocID, accessHash int64, fr []byte, newSize int64, newMime string) error {
 	_, err := d.Exec(ctx, `
         UPDATE videos SET
-            tg_doc_id=$2,
-            access_hash=$3,
-            file_reference=$4,
-            size_bytes=CASE WHEN $5 > 0 THEN $5 ELSE size_bytes END,
-            mime=COALESCE(NULLIF($6, ''), mime)
+            tg_doc_id      = $2,
+            access_hash    = $3,
+            file_reference = $4,
+            file_size      = CASE WHEN $5 > 0 THEN $5 ELSE file_size END,
+            mime_type      = COALESCE(NULLIF($6, ''), mime_type)
         WHERE id=$1
-    `, id, tgDocID, accessHash, fr, size, mime)
-	return err
-}
-
-func (d *DB) UpdateVideoThumb(ctx context.Context, id int64, path string) error {
-	_, err := d.Exec(ctx, `UPDATE videos SET thumb_path=$1 WHERE id=$2`, path, id)
+    `, id, tgDocID, accessHash, fr, newSize, newMime)
 	return err
 }
 
@@ -93,27 +157,28 @@ func (d *DB) CountVideosByChannel(ctx context.Context, userID, channelID int64) 
 	return n, nil
 }
 
+func (d *DB) DeleteVideosByChannel(ctx context.Context, userID, channelID int64) (int64, error) {
+	tag, err := d.Exec(ctx, `DELETE FROM videos WHERE user_id=$1 AND channel_id=$2`, userID, channelID)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 type ListVideosOpts struct {
 	UserID    int64
 	ChannelID int64 // 0 = all
 	Limit     int
-	// OffsetID is a keyset cursor — pass the smallest video.id from the
-	// previous page; we return rows with id strictly less. 0 = first page.
-	OffsetID int64
-	OrderBy  string // "sent_at" (default) | "duration"
-	FavOnly  bool
+	OffsetID  int64 // keyset cursor (smallest id from previous page)
+	OrderBy   string
+	FavOnly   bool
 }
 
 func (d *DB) ListVideos(ctx context.Context, opt ListVideosOpts) ([]Video, error) {
 	if opt.Limit <= 0 || opt.Limit > 500 {
 		opt.Limit = 200
 	}
-	q := `
-        SELECT v.id, v.user_id, v.channel_id, v.tg_message_id, v.tg_doc_id, v.access_hash,
-               v.file_reference, COALESCE(v.mime,''), v.size_bytes, v.duration_sec,
-               v.width, v.height, COALESCE(v.caption,''), v.sent_at, COALESCE(v.thumb_path,'')
-        FROM videos v
-    `
+	q := `SELECT ` + videoCols + ` FROM videos v `
 	args := []any{opt.UserID}
 	where := []string{"v.user_id=$1"}
 	if opt.ChannelID != 0 {
@@ -129,13 +194,12 @@ func (d *DB) ListVideos(ctx context.Context, opt ListVideosOpts) ([]Video, error
 	}
 	q += ` WHERE ` + joinWhere(where)
 	if opt.OrderBy == "duration" {
-		q += ` ORDER BY v.duration_sec DESC, v.id DESC`
+		q += ` ORDER BY v.duration_seconds DESC, v.id DESC`
 	} else {
-		q += ` ORDER BY v.sent_at DESC NULLS LAST, v.id DESC`
+		q += ` ORDER BY v.date DESC NULLS LAST, v.id DESC`
 	}
 	args = append(args, opt.Limit)
 	q += ` LIMIT $` + itoa(len(args))
-
 	rows, err := d.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -143,28 +207,19 @@ func (d *DB) ListVideos(ctx context.Context, opt ListVideosOpts) ([]Video, error
 	defer rows.Close()
 	var out []Video
 	for rows.Next() {
-		var v Video
-		if err := rows.Scan(&v.ID, &v.UserID, &v.ChannelID, &v.TGMessageID, &v.TGDocID, &v.AccessHash,
-			&v.FileReference, &v.Mime, &v.SizeBytes, &v.DurationSec, &v.Width, &v.Height,
-			&v.Caption, &v.SentAt, &v.ThumbPath); err != nil {
+		v, err := scanVideo(rows)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, v)
+		out = append(out, *v)
 	}
 	return out, rows.Err()
 }
 
 func (d *DB) VideoByID(ctx context.Context, id, userID int64) (*Video, error) {
-	row := d.QueryRow(ctx, `
-        SELECT id, user_id, channel_id, tg_message_id, tg_doc_id, access_hash, file_reference,
-               COALESCE(mime,''), size_bytes, duration_sec, width, height,
-               COALESCE(caption,''), sent_at, COALESCE(thumb_path,'')
-        FROM videos WHERE id=$1 AND user_id=$2
-    `, id, userID)
-	v := &Video{}
-	if err := row.Scan(&v.ID, &v.UserID, &v.ChannelID, &v.TGMessageID, &v.TGDocID, &v.AccessHash,
-		&v.FileReference, &v.Mime, &v.SizeBytes, &v.DurationSec, &v.Width, &v.Height,
-		&v.Caption, &v.SentAt, &v.ThumbPath); err != nil {
+	row := d.QueryRow(ctx, `SELECT `+videoCols+` FROM videos v WHERE v.id=$1 AND v.user_id=$2`, id, userID)
+	v, err := scanVideo(row)
+	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -173,25 +228,41 @@ func (d *DB) VideoByID(ctx context.Context, id, userID int64) (*Video, error) {
 	return v, nil
 }
 
+// SearchVideosOpts: any subset of (Text, FileName, DateFrom, DateTo) can be
+// supplied. Empty fields are ignored. ChannelID > 0 narrows to one channel.
 type SearchVideosOpts struct {
 	UserID    int64
-	Query     string
-	ChannelID int64 // 0 = all channels
+	Text      string // ILIKE on `text`
+	FileName  string // ILIKE on `file_name`
+	DateFrom  *time.Time
+	DateTo    *time.Time
+	ChannelID int64
 	Limit     int
 	OffsetID  int64
 }
 
-// SearchVideos uses ILIKE on caption — Postgres' built-in to_tsvector('simple')
-// is whitespace-tokenized, which fails for Chinese text where words aren't
-// space-separated. ILIKE with a per-row scan is slower than FTS but works for
-// any language without extra dependencies. For 100k+ rows add a pg_trgm index
-// later if it gets sluggish.
 func (d *DB) SearchVideos(ctx context.Context, opt SearchVideosOpts) ([]Video, error) {
 	if opt.Limit <= 0 || opt.Limit > 500 {
 		opt.Limit = 200
 	}
-	args := []any{opt.UserID, "%" + opt.Query + "%"}
-	where := []string{"v.user_id=$1", "v.caption ILIKE $2"}
+	args := []any{opt.UserID}
+	where := []string{"v.user_id=$1"}
+	if opt.Text != "" {
+		args = append(args, "%"+opt.Text+"%")
+		where = append(where, "v.text ILIKE $"+itoa(len(args)))
+	}
+	if opt.FileName != "" {
+		args = append(args, "%"+opt.FileName+"%")
+		where = append(where, "v.file_name ILIKE $"+itoa(len(args)))
+	}
+	if opt.DateFrom != nil {
+		args = append(args, *opt.DateFrom)
+		where = append(where, "v.date >= $"+itoa(len(args)))
+	}
+	if opt.DateTo != nil {
+		args = append(args, *opt.DateTo)
+		where = append(where, "v.date <= $"+itoa(len(args)))
+	}
 	if opt.ChannelID != 0 {
 		args = append(args, opt.ChannelID)
 		where = append(where, "v.channel_id=$"+itoa(len(args)))
@@ -201,14 +272,8 @@ func (d *DB) SearchVideos(ctx context.Context, opt SearchVideosOpts) ([]Video, e
 		where = append(where, "v.id < $"+itoa(len(args)))
 	}
 	args = append(args, opt.Limit)
-	q := `
-        SELECT v.id, v.user_id, v.channel_id, v.tg_message_id, v.tg_doc_id, v.access_hash,
-               v.file_reference, COALESCE(v.mime,''), v.size_bytes, v.duration_sec,
-               v.width, v.height, COALESCE(v.caption,''), v.sent_at, COALESCE(v.thumb_path,'')
-        FROM videos v
-        WHERE ` + joinWhere(where) + `
-        ORDER BY v.sent_at DESC NULLS LAST, v.id DESC
-        LIMIT $` + itoa(len(args))
+	q := `SELECT ` + videoCols + ` FROM videos v WHERE ` + joinWhere(where) +
+		` ORDER BY v.date DESC NULLS LAST, v.id DESC LIMIT $` + itoa(len(args))
 	rows, err := d.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -216,26 +281,17 @@ func (d *DB) SearchVideos(ctx context.Context, opt SearchVideosOpts) ([]Video, e
 	defer rows.Close()
 	var out []Video
 	for rows.Next() {
-		var v Video
-		if err := rows.Scan(&v.ID, &v.UserID, &v.ChannelID, &v.TGMessageID, &v.TGDocID, &v.AccessHash,
-			&v.FileReference, &v.Mime, &v.SizeBytes, &v.DurationSec, &v.Width, &v.Height,
-			&v.Caption, &v.SentAt, &v.ThumbPath); err != nil {
+		v, err := scanVideo(rows)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, v)
+		out = append(out, *v)
 	}
 	return out, rows.Err()
 }
 
 func joinWhere(parts []string) string {
-	out := ""
-	for i, p := range parts {
-		if i > 0 {
-			out += " AND "
-		}
-		out += p
-	}
-	return out
+	return strings.Join(parts, " AND ")
 }
 
 func itoa(n int) string {

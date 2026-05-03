@@ -75,6 +75,7 @@ func NewRouter(d Deps) http.Handler {
 			r.Route("/channels", func(r chi.Router) {
 				r.Get("/", chH.List)
 				r.Get("/{id}/videos", chH.ChannelVideos)
+				r.Delete("/{id}/videos", chH.ClearVideos)
 				r.Post("/{id}/import", chH.Import)
 			})
 

@@ -28,12 +28,12 @@ func RefreshFileReference(ctx context.Context, database *db.DB, mgr *tgmanager.M
 		return fmt.Errorf("tg client: %w", err)
 	}
 
-	msgs, err := fetchMessages(ctx, cli.API, ch, int(v.TGMessageID))
+	msgs, err := fetchMessages(ctx, cli.API, ch, int(v.TGMsgID))
 	if err != nil {
 		return err
 	}
 	if len(msgs) == 0 {
-		return fmt.Errorf("消息 %d 在 TG 上找不到 (可能已删除/你已退出频道/access_hash 过期)", v.TGMessageID)
+		return fmt.Errorf("消息 %d 在 TG 上找不到 (可能已删除/你已退出频道/access_hash 过期)", v.TGMsgID)
 	}
 
 	for _, mc := range msgs {
@@ -60,18 +60,18 @@ func RefreshFileReference(ctx context.Context, database *db.DB, mgr *tgmanager.M
 		v.TGDocID = doc.ID
 		v.AccessHash = doc.AccessHash
 		v.FileReference = doc.FileReference
-		if v.SizeBytes == 0 {
-			v.SizeBytes = doc.Size
+		if v.FileSize == 0 {
+			v.FileSize = doc.Size
 		}
-		if v.Mime == "" {
-			v.Mime = doc.MimeType
+		if v.MimeType == "" {
+			v.MimeType = doc.MimeType
 		}
 		if err := database.UpdateVideoLocator(ctx, v.ID, doc.ID, doc.AccessHash, doc.FileReference, doc.Size, doc.MimeType); err != nil {
 			return fmt.Errorf("update locator: %w", err)
 		}
 		return nil
 	}
-	return fmt.Errorf("消息 %d 不含视频 (可能消息只有文本/图片,或 caption 与原视频是两条不同消息)", v.TGMessageID)
+	return fmt.Errorf("消息 %d 不含视频 (可能消息只有文本/图片,或 caption 与原视频是两条不同消息)", v.TGMsgID)
 }
 
 func fetchMessages(ctx context.Context, api *tg.Client, ch *db.Channel, msgID int) ([]tg.MessageClass, error) {
