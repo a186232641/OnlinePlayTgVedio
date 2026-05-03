@@ -72,13 +72,24 @@ export function Player() {
     setContainerHint("");
   }, [id]);
 
-  // Scroll the highlighted item into view when video changes. block:nearest
-  // means: if it's already visible, don't move; if it's off-screen, bring it
-  // to the closest edge — preserving the user's scroll context.
+  // Position the highlighted item inside the sidebar — but only by setting
+  // aside.scrollTop directly, never via scrollIntoView (which can cascade up
+  // to ancestor scroll containers and yank the whole page to the top).
+  // Strategy: if the current item's bounding box is already inside the
+  // aside's visible window, do nothing. Otherwise center it.
   useEffect(() => {
-    if (!sidebarRef.current || !id) return;
-    const el = sidebarRef.current.querySelector<HTMLElement>(`[data-video-id="${id}"]`);
-    if (el) el.scrollIntoView({ block: "nearest", behavior: "auto" });
+    const aside = sidebarRef.current;
+    if (!aside || !id) return;
+    const el = aside.querySelector<HTMLElement>(`[data-video-id="${id}"]`);
+    if (!el) return;
+    const top = el.offsetTop - aside.offsetTop;
+    const bottom = top + el.offsetHeight;
+    const viewTop = aside.scrollTop;
+    const viewBottom = viewTop + aside.clientHeight;
+    if (top >= viewTop && bottom <= viewBottom) {
+      return; // already visible — leave the user's scroll position alone
+    }
+    aside.scrollTop = Math.max(0, top - aside.clientHeight / 2 + el.offsetHeight / 2);
   }, [id, playlistKey]);
 
   const meta = useQuery<VideoResp>({
