@@ -31,12 +31,33 @@ type tdMessage struct {
 	DateUnix     string          `json:"date_unixtime"`
 	MediaType    string          `json:"media_type"`
 	File         string          `json:"file"`
+	FileSize     json.RawMessage `json:"file_size"` // can be number or quoted string
 	MimeType     string          `json:"mime_type"`
 	Duration     int             `json:"duration_seconds"`
 	Width        int             `json:"width"`
-	Height       int             `json:"height"`
+	Height      int             `json:"height"`
 	Text         json.RawMessage `json:"text"` // string OR array of fragments
 	ForumTopicID int             `json:"forum_topic_id"`
+}
+
+// parseFileSize handles both bare number ("file_size":12345) and quoted
+// number ("file_size":"12345") forms — TG Desktop has used both across
+// versions.
+func parseFileSize(raw json.RawMessage) int64 {
+	if len(raw) == 0 {
+		return 0
+	}
+	var n int64
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		if v, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return v
+		}
+	}
+	return 0
 }
 
 // captionFromText collapses TG export's text field, which is either a plain
@@ -157,7 +178,7 @@ func (h *ChannelsHandlers) Import(w http.ResponseWriter, r *http.Request) {
 			AccessHash:    0,
 			FileReference: emptyRef,
 			Mime:          m.MimeType,
-			SizeBytes:     0, // unknown until refresh
+			SizeBytes:     parseFileSize(m.FileSize),
 			DurationSec:   m.Duration,
 			Width:         m.Width,
 			Height:        m.Height,

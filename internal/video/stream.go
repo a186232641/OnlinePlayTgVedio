@@ -24,6 +24,9 @@ import (
 const (
 	chunkAlign = 4096
 	maxChunk   = 1024 * 1024 // 1 MiB — Telegram's per-call limit
+	// maxStream caps the unknown-size path. Bigger than any real video; used
+	// as a sentinel "stream until TG returns empty (EOF)".
+	maxStream = 1 << 60
 )
 
 // StreamServer wires together the dependencies needed to serve a TG video
@@ -84,9 +87,26 @@ func (s *StreamServer) serveFromTelegram(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	mime := v.Mime
+	if mime == "" {
+		mime = "video/mp4"
+	}
+	w.Header().Set("Content-Type", mime)
+
+	// Unknown-size path: TG didn't include Document.Size for this doc (some
+	// videos uploaded by 3rd-party clients lack it). Browsers can still
+	// progressively play but lose seek; we ignore any Range header and stream
+	// from 0 until TG returns an empty chunk (EOF).
 	if v.SizeBytes <= 0 {
-		httpx.WriteError(w, httpx.Errorf(http.StatusInternalServerError, "no_size",
-			fmt.Sprintf("视频 size 未知 (msg=%d, doc=%d) — 元数据可能不完整", v.TGMessageID, v.TGDocID)))
+		w.WriteHeader(http.StatusOK)
+		if r.Method == http.MethodHead {
+			return
+		}
+		if err := s.streamRange(r.Context(), cli.API, v, 0, maxStream, w); err != nil {
+			if !errors.Is(err, context.Canceled) {
+				slog.Warn("stream(unknown size) failed", "video_id", v.ID, "err", err)
+			}
+		}
 		return
 	}
 
@@ -98,11 +118,6 @@ func (s *StreamServer) serveFromTelegram(w http.ResponseWriter, r *http.Request,
 	}
 
 	contentLen := end - start + 1
-	mime := v.Mime
-	if mime == "" {
-		mime = "video/mp4"
-	}
-	w.Header().Set("Content-Type", mime)
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Content-Length", strconv.FormatInt(contentLen, 10))
 

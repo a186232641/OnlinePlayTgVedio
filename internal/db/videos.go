@@ -64,12 +64,18 @@ func (d *DB) UpdateVideoFileReference(ctx context.Context, id int64, fr []byte) 
 
 // UpdateVideoLocator persists the full Telegram doc locator. Used after
 // JSON-imported placeholder rows get their first refresh, populating
-// tg_doc_id + access_hash + file_reference together.
-func (d *DB) UpdateVideoLocator(ctx context.Context, id int64, tgDocID, accessHash int64, fr []byte) error {
+// tg_doc_id + access_hash + file_reference together. size > 0 also persists
+// size_bytes; mime != "" persists mime.
+func (d *DB) UpdateVideoLocator(ctx context.Context, id int64, tgDocID, accessHash int64, fr []byte, size int64, mime string) error {
 	_, err := d.Exec(ctx, `
-        UPDATE videos SET tg_doc_id=$2, access_hash=$3, file_reference=$4
+        UPDATE videos SET
+            tg_doc_id=$2,
+            access_hash=$3,
+            file_reference=$4,
+            size_bytes=CASE WHEN $5 > 0 THEN $5 ELSE size_bytes END,
+            mime=COALESCE(NULLIF($6, ''), mime)
         WHERE id=$1
-    `, id, tgDocID, accessHash, fr)
+    `, id, tgDocID, accessHash, fr, size, mime)
 	return err
 }
 
