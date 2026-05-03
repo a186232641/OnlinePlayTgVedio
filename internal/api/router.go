@@ -13,16 +13,18 @@ import (
 	"github.com/hanfeilong/onlineplaytgvideo/internal/httpx"
 	"github.com/hanfeilong/onlineplaytgvideo/internal/indexer"
 	"github.com/hanfeilong/onlineplaytgvideo/internal/tglogin"
+	"github.com/hanfeilong/onlineplaytgvideo/internal/tgmanager"
 )
 
 type Deps struct {
-	Cfg     *config.Config
-	DB      *db.DB
-	Login   *tglogin.Manager
-	Indexer *indexer.Indexer
-	OnFavAdd    func(userID, videoID int64)
-	OnFavRemove func(userID, videoID int64)
-	StreamHandler http.HandlerFunc // wired in Phase 6
+	Cfg           *config.Config
+	DB            *db.DB
+	Login         *tglogin.Manager
+	Indexer       *indexer.Indexer
+	TGMgr         *tgmanager.Manager
+	OnFavAdd      func(userID, videoID int64)
+	OnFavRemove   func(userID, videoID int64)
+	StreamHandler http.HandlerFunc
 }
 
 func NewRouter(d Deps) http.Handler {
@@ -37,11 +39,10 @@ func NewRouter(d Deps) http.Handler {
 	})
 
 	authH := &handlers.AuthHandlers{Cfg: cfg, DB: database}
-	tgH := &handlers.TGLoginHandlers{DB: database, Login: d.Login}
-	chH := &handlers.ChannelsHandlers{DB: database}
+	tgH := &handlers.TGLoginHandlers{DB: database, Login: d.Login, TGMgr: d.TGMgr, Indexer: d.Indexer}
+	chH := &handlers.ChannelsHandlers{DB: database, Indexer: d.Indexer}
 	vidH := &handlers.VideosHandlers{Cfg: cfg, DB: database}
 	favH := &handlers.FavoritesHandlers{DB: database, OnAdd: d.OnFavAdd, OnRemove: d.OnFavRemove}
-	idxH := &handlers.IndexHandlers{DB: database, Indexer: d.Indexer}
 
 	r.Route("/api", func(r chi.Router) {
 		r.Route("/auth", func(r chi.Router) {
@@ -59,20 +60,23 @@ func NewRouter(d Deps) http.Handler {
 			r.Use(web.RequireUser(cfg.JWTSecret))
 
 			r.Route("/tg", func(r chi.Router) {
-				r.Get("/status", tgH.Status)
 				r.Post("/login/start", tgH.Start)
 				r.Post("/login/code", tgH.Code)
 				r.Post("/login/password", tgH.Password)
-			})
 
-			r.Route("/index", func(r chi.Router) {
-				r.Get("/status", idxH.Status)
-				r.Post("/start", idxH.Start)
+				r.Route("/sessions", func(r chi.Router) {
+					r.Get("/", tgH.ListSessions)
+					r.Patch("/{id}", tgH.UpdateLabel)
+					r.Delete("/{id}", tgH.DeleteSession)
+					r.Post("/{id}/refresh", tgH.RefreshDiscover)
+				})
 			})
 
 			r.Route("/channels", func(r chi.Router) {
 				r.Get("/", chH.List)
 				r.Get("/{id}/videos", chH.ChannelVideos)
+				r.Post("/{id}/index", chH.EnableIndex)
+				r.Delete("/{id}/index", chH.DisableIndex)
 			})
 
 			r.Route("/videos", func(r chi.Router) {

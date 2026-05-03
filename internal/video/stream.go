@@ -63,7 +63,12 @@ func (s *StreamServer) Handler() http.HandlerFunc {
 }
 
 func (s *StreamServer) serveFromTelegram(w http.ResponseWriter, r *http.Request, v *db.Video) {
-	cli, err := s.TG.ClientFor(v.UserID)
+	ch, err := s.DB.ChannelByID(r.Context(), v.ChannelID, v.UserID)
+	if err != nil {
+		httpx.WriteError(w, httpx.Errorf(http.StatusServiceUnavailable, "channel_lookup", "channel not found"))
+		return
+	}
+	cli, err := s.TG.ClientForSession(ch.TGSessionID)
 	if err != nil {
 		httpx.WriteError(w, httpx.Errorf(http.StatusServiceUnavailable, "tg_unavailable", "telegram client not ready"))
 		return

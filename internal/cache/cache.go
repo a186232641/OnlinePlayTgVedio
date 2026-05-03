@@ -211,7 +211,11 @@ func (m *Manager) downloadFavorite(ctx context.Context, videoID int64) error {
 	if err != nil {
 		return err
 	}
-	cli, err := m.tg.ClientFor(v.UserID)
+	ch, err := m.db.ChannelByID(ctx, v.ChannelID, v.UserID)
+	if err != nil {
+		return err
+	}
+	cli, err := m.tg.ClientForSession(ch.TGSessionID)
 	if err != nil {
 		return err
 	}

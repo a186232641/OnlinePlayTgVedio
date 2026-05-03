@@ -11,15 +11,15 @@ import (
 	"github.com/hanfeilong/onlineplaytgvideo/internal/tgmanager"
 )
 
-// RefreshFileReference re-fetches the message that originally carried the
-// video, extracts the fresh Document.FileReference, persists it, and updates
-// the supplied video pointer in place. Returns nil if the refresh succeeded.
+// RefreshFileReference re-fetches the original message via the same TG
+// session that owns the channel, extracts the fresh Document.FileReference,
+// persists it, and updates the supplied video pointer in place.
 func RefreshFileReference(ctx context.Context, database *db.DB, mgr *tgmanager.Manager, v *db.Video) error {
-	cli, err := mgr.ClientFor(v.UserID)
+	ch, err := database.ChannelByID(ctx, v.ChannelID, v.UserID)
 	if err != nil {
 		return err
 	}
-	ch, err := database.ChannelByID(ctx, v.ChannelID, v.UserID)
+	cli, err := mgr.ClientForSession(ch.TGSessionID)
 	if err != nil {
 		return err
 	}

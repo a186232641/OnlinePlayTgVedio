@@ -33,9 +33,10 @@ const (
 const flowTTL = 15 * time.Minute
 
 type pending struct {
-	id     string
-	userID int64
-	phone  string
+	id        string
+	userID    int64
+	sessionID int64
+	phone     string
 
 	mu    sync.Mutex
 	stage Stage
@@ -65,11 +66,11 @@ type Manager struct {
 	flows map[string]*pending
 
 	// onActivated is invoked after a session goes active so the caller
-	// (e.g. tgmanager) can spin up the persistent client.
-	onActivated func(userID int64)
+	// (e.g. tgmanager) can spin up the persistent client for it.
+	onActivated func(userID, sessionID int64)
 }
 
-func NewManager(cfg *config.Config, database *db.DB, onActivated func(userID int64)) *Manager {
+func NewManager(cfg *config.Config, database *db.DB, onActivated func(userID, sessionID int64)) *Manager {
 	m := &Manager{cfg: cfg, db: database, flows: map[string]*pending{}, onActivated: onActivated}
 	go m.gcLoop()
 	return m
@@ -105,10 +106,19 @@ func (m *Manager) Start(parentCtx context.Context, userID int64, phone string) (
 		return "", StageError, err
 	}
 
+	// Create a fresh tg_sessions row up-front so the gotd session storage
+	// has a stable row to write the encrypted blob into. Multiple binds
+	// for the same user thus get distinct rows.
+	sessionID, err := m.db.CreateTGSession(parentCtx, userID, phone)
+	if err != nil {
+		return "", StageError, fmt.Errorf("create tg_session: %w", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &pending{
 		id:             id,
 		userID:         userID,
+		sessionID:      sessionID,
 		phone:          phone,
 		stage:          StageInit,
 		codeCh:         make(chan string, 1),
@@ -124,7 +134,7 @@ func (m *Manager) Start(parentCtx context.Context, userID int64, phone string) (
 	m.flows[id] = p
 	m.mu.Unlock()
 
-	storage := &tgsession.Storage{DB: m.db, UserID: userID, MasterKey: m.cfg.MasterKey}
+	storage := &tgsession.Storage{DB: m.db, SessionID: sessionID, MasterKey: m.cfg.MasterKey}
 	client := telegram.NewClient(m.cfg.TgAPIID, m.cfg.TgAPIHash, telegram.Options{
 		SessionStorage: storage,
 	})
@@ -145,19 +155,19 @@ func (m *Manager) Start(parentCtx context.Context, userID int64, phone string) (
 			if err != nil {
 				return fmt.Errorf("self: %w", err)
 			}
-			if err := m.db.MarkTGSessionActive(rctx, p.userID, p.phone, self.ID); err != nil {
+			if err := m.db.MarkTGSessionActive(rctx, p.sessionID, p.phone, self.ID); err != nil {
 				return fmt.Errorf("mark active: %w", err)
 			}
 			return nil
 		})
 		if err != nil {
-			slog.Warn("tg login failed", "user_id", userID, "err", err)
+			slog.Warn("tg login failed", "user_id", userID, "session_id", p.sessionID, "err", err)
 			p.setError(err)
 			return
 		}
 		p.setStage(StageDone)
 		if m.onActivated != nil {
-			m.onActivated(userID)
+			m.onActivated(userID, p.sessionID)
 		}
 	}()
 

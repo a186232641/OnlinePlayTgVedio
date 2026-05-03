@@ -53,6 +53,13 @@ func main() {
 
 	idx := indexer.New(cfg, database, tgMgr)
 
+	// Spin up an indexing worker for every session that came back online.
+	if refs, err := database.ListActiveTGSessions(rootCtx); err == nil {
+		for _, ref := range refs {
+			idx.EnsureWorker(ref.ID)
+		}
+	}
+
 	cacheMgr := cache.New(cfg, database, tgMgr)
 	if err := cacheMgr.Start(rootCtx); err != nil {
 		slog.Error("cache start failed", "err", err)
@@ -62,12 +69,13 @@ func main() {
 
 	stream := &video.StreamServer{Cfg: cfg, DB: database, TG: tgMgr, Cache: cacheMgr}
 
-	loginMgr := tglogin.NewManager(cfg, database, func(uid int64) {
-		if err := tgMgr.Start(context.Background(), uid); err != nil {
-			slog.Warn("start tg client after login", "user_id", uid, "err", err)
+	loginMgr := tglogin.NewManager(cfg, database, func(uid, sid int64) {
+		if err := tgMgr.Start(context.Background(), uid, sid); err != nil {
+			slog.Warn("start tg client after login", "user_id", uid, "session_id", sid, "err", err)
 			return
 		}
-		idx.Trigger(uid)
+		idx.EnsureWorker(sid)
+		idx.TriggerDiscover(sid)
 	})
 
 	router := api.NewRouter(api.Deps{
@@ -75,6 +83,7 @@ func main() {
 		DB:            database,
 		Login:         loginMgr,
 		Indexer:       idx,
+		TGMgr:         tgMgr,
 		StreamHandler: stream.Handler(),
 		OnFavAdd:      cacheMgr.EnqueueFavorite,
 		OnFavRemove:   cacheMgr.HandleUnfavorite,

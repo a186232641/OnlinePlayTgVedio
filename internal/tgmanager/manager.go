@@ -18,19 +18,30 @@ import (
 	"github.com/hanfeilong/onlineplaytgvideo/internal/tgsession"
 )
 
-// Manager owns one persistent gotd client per active user.
+// Manager owns one persistent gotd client per active tg_session row. A user
+// may bind multiple TG accounts; each gets its own client keyed by session id.
 type Manager struct {
 	cfg *config.Config
 	db  *db.DB
 
 	mu      sync.RWMutex
-	clients map[int64]*entry
+	clients map[int64]*entry // key: tg_session_id
 }
 
 type entry struct {
+	userID int64
 	client *telegram.Client
 	api    *tg.Client
 	stop   bg.StopFunc
+}
+
+// Client bundles the high-level + low-level handles a caller needs, plus the
+// owning user id so callers can scope DB writes correctly.
+type Client struct {
+	UserID    int64
+	SessionID int64
+	Telegram  *telegram.Client
+	API       *tg.Client
 }
 
 // waiterClient adapts (*telegram.Client + *floodwait.Waiter) to bg.Client so
@@ -46,12 +57,6 @@ func (w waiterClient) Run(ctx context.Context, f func(ctx context.Context) error
 	})
 }
 
-// Client bundles the high-level + low-level handles a caller needs.
-type Client struct {
-	Telegram *telegram.Client
-	API      *tg.Client
-}
-
 func New(cfg *config.Config, database *db.DB) *Manager {
 	return &Manager{
 		cfg:     cfg,
@@ -60,32 +65,32 @@ func New(cfg *config.Config, database *db.DB) *Manager {
 	}
 }
 
-// RestoreActive starts a client for every user whose tg_session is active.
+// RestoreActive starts a client for every active tg_session in DB.
 // Failures are logged but do not abort startup.
 func (m *Manager) RestoreActive(ctx context.Context) error {
-	ids, err := m.db.ListActiveTGSessionUsers(ctx)
+	refs, err := m.db.ListActiveTGSessions(ctx)
 	if err != nil {
 		return fmt.Errorf("list active sessions: %w", err)
 	}
-	for _, uid := range ids {
-		if err := m.Start(ctx, uid); err != nil {
-			slog.Warn("restore tg client failed", "user_id", uid, "err", err)
+	for _, ref := range refs {
+		if err := m.Start(ctx, ref.UserID, ref.ID); err != nil {
+			slog.Warn("restore tg client failed", "user_id", ref.UserID, "session_id", ref.ID, "err", err)
 		}
 	}
-	slog.Info("tgmanager restored", "count", len(ids))
+	slog.Info("tgmanager restored", "count", len(refs))
 	return nil
 }
 
-// Start brings up a client for the given user (idempotent).
-func (m *Manager) Start(ctx context.Context, userID int64) error {
+// Start brings up a client for the given session (idempotent).
+func (m *Manager) Start(ctx context.Context, userID, sessionID int64) error {
 	m.mu.Lock()
-	if _, ok := m.clients[userID]; ok {
+	if _, ok := m.clients[sessionID]; ok {
 		m.mu.Unlock()
 		return nil
 	}
 	m.mu.Unlock()
 
-	storage := &tgsession.Storage{DB: m.db, UserID: userID, MasterKey: m.cfg.MasterKey}
+	storage := &tgsession.Storage{DB: m.db, SessionID: sessionID, MasterKey: m.cfg.MasterKey}
 
 	waiter := floodwait.NewWaiter().WithMaxRetries(5)
 
@@ -96,15 +101,11 @@ func (m *Manager) Start(ctx context.Context, userID int64) error {
 		},
 	})
 
-	// floodwait.Waiter only processes rate-limit retries while waiter.Run is
-	// active. bg.Connect runs whatever Client interface we hand it, so we
-	// hand it a wrapper that nests client.Run inside waiter.Run.
 	stop, err := bg.Connect(waiterClient{client: client, waiter: waiter})
 	if err != nil {
 		return fmt.Errorf("bg.Connect: %w", err)
 	}
 
-	// Quick auth probe so we don't keep a client whose session is broken.
 	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	if _, err := client.Self(probeCtx); err != nil {
 		cancel()
@@ -114,19 +115,24 @@ func (m *Manager) Start(ctx context.Context, userID int64) error {
 	cancel()
 
 	m.mu.Lock()
-	m.clients[userID] = &entry{client: client, api: client.API(), stop: stop}
+	m.clients[sessionID] = &entry{
+		userID: userID,
+		client: client,
+		api:    client.API(),
+		stop:   stop,
+	}
 	m.mu.Unlock()
 
-	slog.Info("tg client started", "user_id", userID)
+	slog.Info("tg client started", "user_id", userID, "session_id", sessionID)
 	return nil
 }
 
-// Stop tears down the client for a user (no-op if not running).
-func (m *Manager) Stop(userID int64) error {
+// Stop tears down the client for a session (no-op if not running).
+func (m *Manager) Stop(sessionID int64) error {
 	m.mu.Lock()
-	e, ok := m.clients[userID]
+	e, ok := m.clients[sessionID]
 	if ok {
-		delete(m.clients, userID)
+		delete(m.clients, sessionID)
 	}
 	m.mu.Unlock()
 	if !ok || e.stop == nil {
@@ -135,25 +141,43 @@ func (m *Manager) Stop(userID int64) error {
 	return e.stop()
 }
 
-// ClientFor returns the active client for a user, or an error if none.
-func (m *Manager) ClientFor(userID int64) (*Client, error) {
+// ClientForSession returns the active client for a session.
+func (m *Manager) ClientForSession(sessionID int64) (*Client, error) {
 	m.mu.RLock()
-	e, ok := m.clients[userID]
+	e, ok := m.clients[sessionID]
 	m.mu.RUnlock()
 	if !ok {
-		return nil, errors.New("no telegram client for user")
+		return nil, errors.New("no telegram client for session")
 	}
-	return &Client{Telegram: e.client, API: e.api}, nil
+	return &Client{UserID: e.userID, SessionID: sessionID, Telegram: e.client, API: e.api}, nil
+}
+
+// ClientsForUser returns every running client owned by a user (for picking
+// which one can serve a request — usually the request specifies sessionID,
+// but legacy callers may iterate).
+func (m *Manager) ClientsForUser(userID int64) []*Client {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []*Client
+	for sid, e := range m.clients {
+		if e.userID == userID {
+			out = append(out, &Client{
+				UserID: e.userID, SessionID: sid,
+				Telegram: e.client, API: e.api,
+			})
+		}
+	}
+	return out
 }
 
 // Shutdown stops every client. Call before process exit.
 func (m *Manager) Shutdown() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for uid, e := range m.clients {
+	for sid, e := range m.clients {
 		if e.stop != nil {
 			if err := e.stop(); err != nil {
-				slog.Warn("stop client", "user_id", uid, "err", err)
+				slog.Warn("stop client", "session_id", sid, "err", err)
 			}
 		}
 	}

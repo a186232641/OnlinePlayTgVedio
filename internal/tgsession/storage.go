@@ -9,18 +9,19 @@ import (
 	"github.com/hanfeilong/onlineplaytgvideo/internal/db"
 )
 
-// Storage is a per-user gotd session.Storage backed by the tg_sessions table.
-// Session blobs are encrypted at rest with AES-256-GCM using the master key.
+// Storage is a per-session gotd session.Storage backed by one tg_sessions
+// row (keyed by SessionID, not UserID — one user can own many sessions).
+// Blobs are encrypted at rest with AES-256-GCM using the master key.
 type Storage struct {
 	DB        *db.DB
-	UserID    int64
+	SessionID int64
 	MasterKey []byte
 }
 
 var _ session.Storage = (*Storage)(nil)
 
 func (s *Storage) LoadSession(ctx context.Context) ([]byte, error) {
-	enc, err := s.DB.LoadTGSessionBlob(ctx, s.UserID)
+	enc, err := s.DB.LoadTGSessionBlob(ctx, s.SessionID)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			return nil, session.ErrNotFound
@@ -42,5 +43,5 @@ func (s *Storage) StoreSession(ctx context.Context, data []byte) error {
 	if err != nil {
 		return err
 	}
-	return s.DB.StoreTGSessionBlob(ctx, s.UserID, enc)
+	return s.DB.StoreTGSessionBlob(ctx, s.SessionID, enc)
 }
