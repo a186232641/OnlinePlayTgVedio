@@ -78,7 +78,15 @@ export function ChannelDetail() {
       {q.isLoading ? (
         <div className="p-6 text-slate-400">加载中…</div>
       ) : (
-        <VideoGrid videos={all} />
+        <VideoGrid
+          videos={all}
+          linkTo={(v) => {
+            const params = new URLSearchParams();
+            params.set("ch", String(id));
+            if (query) params.set("q", query);
+            return `/videos/${v.id}?${params}`;
+          }}
+        />
       )}
 
       <div className="py-6 flex items-center justify-center">

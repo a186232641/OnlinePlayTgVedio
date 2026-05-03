@@ -134,7 +134,18 @@ export function Search() {
       {hasAny(submitted) && result.data && (
         <>
           <div className="px-6 pt-4 text-xs text-slate-500">命中 {all.length} 条</div>
-          <VideoGrid videos={all} />
+          <VideoGrid
+            videos={all}
+            linkTo={(v) => {
+              const p = new URLSearchParams();
+              if (submitted.text) p.set("text", submitted.text);
+              if (submitted.fileName) p.set("file_name", submitted.fileName);
+              if (submitted.dateFrom) p.set("date_from", submitted.dateFrom);
+              if (submitted.dateTo) p.set("date_to", submitted.dateTo);
+              if (submitted.channelID > 0) p.set("ch", String(submitted.channelID));
+              return `/videos/${v.id}?${p}`;
+            }}
+          />
           <div className="py-6 flex items-center justify-center">
             {result.hasNextPage ? (
               <button

@@ -30,14 +30,23 @@ function fmtDate(s?: string) {
 
 // Pure-text card with file_name as the headline (caption second, since TG
 // Desktop captions are often empty / hashtag-only).
-export function VideoGrid({ videos }: { videos: Video[] }) {
+//
+// `linkTo`: optional builder so callers can encode playlist context into the
+// URL (e.g. /videos/X?ch=13 — the player picks that up to build a playlist).
+export function VideoGrid({
+  videos,
+  linkTo,
+}: {
+  videos: Video[];
+  linkTo?: (v: Video) => string;
+}) {
   if (videos.length === 0) return <div className="p-6 text-slate-400">暂无视频</div>;
   return (
     <div className="p-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
       {videos.map((v) => (
         <Link
           key={v.id}
-          to={`/videos/${v.id}`}
+          to={linkTo ? linkTo(v) : `/videos/${v.id}`}
           className="group p-3 rounded bg-slate-900 border border-slate-800 hover:border-emerald-700 flex flex-col gap-2 min-h-[110px]"
         >
           <div className="text-sm font-medium leading-snug line-clamp-2 break-all group-hover:text-emerald-300">
