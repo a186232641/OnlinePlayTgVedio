@@ -164,9 +164,17 @@ function ChannelRow({
           </div>
         )}
         {!isSyncing && sync.data?.last_error && (
-          <div className="text-xs text-red-400 mt-0.5 truncate" title={sync.data.last_error}>
-            上次同步失败: {sync.data.last_error}
-          </div>
+          (() => {
+            const isUpToDate = sync.data.last_error.startsWith("已是最新");
+            return (
+              <div
+                className={"text-xs mt-0.5 truncate " + (isUpToDate ? "text-sky-400" : "text-red-400")}
+                title={sync.data.last_error}
+              >
+                {isUpToDate ? sync.data.last_error : `上次同步失败: ${sync.data.last_error}`}
+              </div>
+            );
+          })()
         )}
       </div>
       <div className="text-xs text-slate-500 w-20 text-right">{c.video_count} 视频</div>

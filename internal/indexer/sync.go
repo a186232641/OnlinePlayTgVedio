@@ -116,14 +116,31 @@ func (i *Indexer) runSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
 		return
 	}
 	probeMsgs := extractMessages(probe)
+	probeLatest := int64(0)
+	for _, mc := range probeMsgs {
+		if m, ok := mc.(*tg.Message); ok && int64(m.ID) > probeLatest {
+			probeLatest = int64(m.ID)
+		}
+	}
 	slog.Info("sync probe ok",
 		"channel_id", ch.ID,
 		"resp_type", fmt.Sprintf("%T", probe),
 		"messages", len(probeMsgs),
+		"latest_msg_id", probeLatest,
 	)
 	if len(probeMsgs) == 0 {
 		st.update(func(s *SyncState) {
 			s.LastError = "TG 返回 0 条历史消息(可能 access_hash 已过期或失去访问权限,试着在 TG 账号管理页'重新发现')"
+		})
+		return
+	}
+	// Already up-to-date: TG's latest message is older than what we already
+	// have. Report this distinctly so the UI doesn't show a confusing "0/0".
+	if maxSeen > 0 && probeLatest > 0 && probeLatest <= maxSeen {
+		slog.Info("sync up-to-date",
+			"channel_id", ch.ID, "tg_latest", probeLatest, "max_seen", maxSeen)
+		st.update(func(s *SyncState) {
+			s.LastError = fmt.Sprintf("已是最新(本地已有到 msg_id=%d,TG 频道最新消息 id=%d)", maxSeen, probeLatest)
 		})
 		return
 	}
