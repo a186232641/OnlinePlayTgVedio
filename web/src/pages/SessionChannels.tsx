@@ -127,7 +127,14 @@ function ChannelRow({
   onDisable: (id: number) => void;
 }) {
   const isForum = c.dialog_kind === "forum";
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(isForum);
+
+  const enabledChildCount = children.filter((t) => t.index_enabled).length;
+  const totalChildCount = children.length;
+  const allEnabled = totalChildCount > 0 && enabledChildCount === totalChildCount;
+  const totalTopicVideos = isForum
+    ? children.reduce((acc, t) => acc + (t.video_count ?? 0), 0)
+    : c.video_count;
 
   return (
     <div className="rounded bg-slate-900 border border-slate-800">
@@ -147,21 +154,40 @@ function ChannelRow({
         <div className="flex-1 min-w-0">
           <div className="truncate">{c.title}</div>
           {c.username && <div className="text-xs text-slate-500">@{c.username}</div>}
+          {isForum && totalChildCount > 0 && (
+            <div className="text-xs text-slate-500 mt-0.5">
+              已开启索引 {enabledChildCount}/{totalChildCount} 个话题
+            </div>
+          )}
         </div>
-        <div className="text-xs text-slate-500 w-20 text-right">{c.video_count} 视频</div>
+        <div className="text-xs text-slate-500 w-20 text-right">{totalTopicVideos} 视频</div>
         <StatusBadge c={c} />
-        {!isForum && (
-          c.index_enabled ? (
+        {isForum ? (
+          totalChildCount === 0 ? (
+            <span className="text-xs text-slate-500 px-3 py-1">无话题</span>
+          ) : allEnabled ? (
             <button
               onClick={() => onDisable(c.id)}
               className="px-3 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded"
-            >关闭索引</button>
+              title="关闭所有子话题的索引"
+            >全部关闭</button>
           ) : (
             <button
               onClick={() => onEnable(c.id)}
               className="px-3 py-1 text-xs bg-emerald-700 hover:bg-emerald-600 rounded"
-            >开启索引</button>
+              title="开启所有子话题的索引"
+            >{enabledChildCount > 0 ? "开启剩余" : "全部开启"}</button>
           )
+        ) : c.index_enabled ? (
+          <button
+            onClick={() => onDisable(c.id)}
+            className="px-3 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded"
+          >关闭索引</button>
+        ) : (
+          <button
+            onClick={() => onEnable(c.id)}
+            className="px-3 py-1 text-xs bg-emerald-700 hover:bg-emerald-600 rounded"
+          >开启索引</button>
         )}
       </div>
       {isForum && expanded && children.length > 0 && (

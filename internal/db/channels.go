@@ -117,6 +117,24 @@ func (d *DB) SetChannelIndexEnabled(ctx context.Context, channelID, userID int64
 	return err
 }
 
+// SetForumChildrenIndexEnabled bulk-toggles every topic row under a forum.
+// The forum container itself stays index_enabled=false (it has no feed of
+// its own); only topic children are crawled by the worker.
+// Returns how many rows were affected.
+func (d *DB) SetForumChildrenIndexEnabled(ctx context.Context, forumID, userID int64, enabled bool) (int64, error) {
+	tag, err := d.Exec(ctx, `
+        UPDATE channels
+        SET index_enabled=$3,
+            index_status=CASE WHEN $3 THEN 'queued' ELSE 'idle' END,
+            index_error=NULL
+        WHERE parent_channel_id=$1 AND user_id=$2 AND dialog_kind='topic'
+    `, forumID, userID, enabled)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 func (d *DB) SetChannelIndexStatus(ctx context.Context, channelID int64, status, errMsg string) error {
 	_, err := d.Exec(ctx, `
         UPDATE channels SET index_status=$2, index_error=NULLIF($3,'') WHERE id=$1

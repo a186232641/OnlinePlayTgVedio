@@ -170,16 +170,24 @@ func (h *ChannelsHandlers) toggleIndex(w http.ResponseWriter, r *http.Request, e
 		httpx.WriteError(w, httpx.Errorf(http.StatusNotFound, "not_found", "channel not found"))
 		return
 	}
+	resp := map[string]any{"ok": true, "enabled": enabled}
+	// Forum container: cascade toggle to every topic under it. The forum row
+	// itself has no feed, so its own index_enabled stays false.
 	if ch.DialogKind == db.DialogKindForum {
-		httpx.WriteError(w, httpx.Errorf(http.StatusBadRequest, "forum_root", "forum container itself is not indexable; toggle individual topics"))
-		return
-	}
-	if err := h.DB.SetChannelIndexEnabled(r.Context(), cid, uid, enabled); err != nil {
-		httpx.WriteError(w, err)
-		return
+		n, err := h.DB.SetForumChildrenIndexEnabled(r.Context(), cid, uid, enabled)
+		if err != nil {
+			httpx.WriteError(w, err)
+			return
+		}
+		resp["topics_affected"] = n
+	} else {
+		if err := h.DB.SetChannelIndexEnabled(r.Context(), cid, uid, enabled); err != nil {
+			httpx.WriteError(w, err)
+			return
+		}
 	}
 	if enabled && h.Indexer != nil {
 		h.Indexer.NudgeWorker(ch.TGSessionID)
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "enabled": enabled})
+	httpx.WriteJSON(w, http.StatusOK, resp)
 }
