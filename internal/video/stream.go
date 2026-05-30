@@ -36,6 +36,10 @@ const (
 	// browser gives up tens of seconds later, freezing playback with no error.
 	// Failing fast surfaces a logged DeadlineExceeded instead.
 	chunkTimeout = 30 * time.Second
+	// readAheadWorkers is how many 1 MiB blocks a bounded Range request fetches
+	// from Telegram concurrently. Overlapping round-trips lifts throughput on
+	// large videos; kept small so a single playback doesn't hammer TG (FLOOD).
+	readAheadWorkers = 4
 )
 
 // StreamServer wires together the dependencies needed to serve a TG video
@@ -170,12 +174,171 @@ func (s *StreamServer) serveFromTelegram(w http.ResponseWriter, r *http.Request,
 	}
 }
 
-// streamRange reads [start, end] from Telegram and writes it to dst.
-// Telegram requires offset to be divisible by limit; we always request
-// 1 MiB blocks aligned to 1 MiB boundaries, then trim the leading
-// (cursor - alignedOffset) bytes off the first chunk and tail bytes off
-// the last so the caller sees exactly the bytes they asked for.
+// streamRange reads [start, end] from Telegram and writes it to dst, in order.
+// Telegram requires offset to be divisible by limit; we always request 1 MiB
+// blocks aligned to 1 MiB boundaries, then trim the leading (start-aligned)
+// bytes off the first block and the tail off the last so the caller sees
+// exactly the bytes they asked for.
+//
+// Bounded ranges (the common Range-request case) go through streamWindowed,
+// which fetches several blocks concurrently to overlap TG round-trips and lift
+// throughput on large/high-bitrate videos. The unknown-size path (end ==
+// maxStream) can't plan blocks ahead of EOF, so it stays sequential.
 func (s *StreamServer) streamRange(ctx context.Context, api *tg.Client, v *db.Video, start, end int64, dst io.Writer) error {
+	if end >= maxStream {
+		return s.streamSequential(ctx, api, v, start, end, dst)
+	}
+	// Bounded range. streamWindowed returns the bytes it managed to write so a
+	// mid-stream file_reference refresh can resume from the exact cursor (the
+	// client stream can't be rewound).
+	cursor := start
+	refreshed := false
+	fetch := func(c context.Context, offset int64) ([]byte, error) { return fetchBlock(c, api, v, offset) }
+	for cursor <= end {
+		n, err := streamWindowed(ctx, fetch, cursor, end, dst, v.ID)
+		cursor += n
+		if err == nil {
+			return nil
+		}
+		if !refreshed && tgerr.Is(err, "FILE_REFERENCE_EXPIRED") {
+			refreshed = true
+			if rerr := RefreshFileReference(ctx, s.DB, s.TG, v); rerr != nil {
+				return fmt.Errorf("refresh file_reference: %w", rerr)
+			}
+			continue
+		}
+		return err
+	}
+	return nil
+}
+
+// streamWindowed fetches the aligned 1 MiB blocks covering [start, end] with a
+// small pool of concurrent upload.getFile calls and writes them to dst in
+// order. Worker w owns the stripe of blocks {w, w+W, w+2W, …} and sends each
+// over its own size-1 channel, so each worker runs at most one block ahead of
+// what the in-order writer has consumed — bounding read-ahead to ~2·W blocks
+// of memory and in-flight RPCs. Returns bytes written (for resume) and the
+// first error seen. fetch retrieves one aligned 1 MiB block at the given
+// offset (it's the only TG dependency, so this stays unit-testable).
+func streamWindowed(ctx context.Context, fetch func(context.Context, int64) ([]byte, error), start, end int64, dst io.Writer, videoID int64) (int64, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel() // unblocks workers when the writer stops early (error/EOF)
+
+	alignedStart := start - start%chunkSize
+
+	// Don't spin up more workers than there are blocks to fetch — a tiny range
+	// (e.g. the 16-byte container probe) needs just one, not four 1 MiB fetches.
+	nBlocks := (end-end%chunkSize-alignedStart)/chunkSize + 1
+	workers := readAheadWorkers
+	if int64(workers) > nBlocks {
+		workers = int(nBlocks)
+	}
+
+	type result struct {
+		data []byte
+		err  error
+	}
+	chans := make([]chan result, workers)
+	for i := range chans {
+		chans[i] = make(chan result, 1)
+	}
+
+	// v's locator is only mutated by RefreshFileReference between windowed
+	// passes (never during one), so concurrent reads here are race-free.
+	for w := 0; w < workers; w++ {
+		go func(w int) {
+			for offset := alignedStart + int64(w)*chunkSize; offset <= end; offset += int64(workers) * chunkSize {
+				data, err := fetch(ctx, offset)
+				select {
+				case chans[w] <- result{data: data, err: err}:
+				case <-ctx.Done():
+					return
+				}
+				if err != nil {
+					return
+				}
+			}
+		}(w)
+	}
+
+	remaining := end - start + 1
+	var written int64
+	for i := 0; ; i++ {
+		var res result
+		select {
+		case res = <-chans[i%workers]:
+		case <-ctx.Done():
+			return written, ctx.Err()
+		}
+		if res.err != nil {
+			return written, fmt.Errorf("upload.getFile: %w", res.err)
+		}
+		data := res.data
+		if i == 0 {
+			if skip := start - alignedStart; int64(len(data)) > skip {
+				data = data[skip:]
+			} else {
+				data = nil
+			}
+			if len(res.data) >= 8 {
+				slog.Info("stream first-chunk header",
+					"video_id", videoID, "chunk_size", len(res.data),
+					"hex8", fmt.Sprintf("%02x %02x %02x %02x %02x %02x %02x %02x",
+						res.data[0], res.data[1], res.data[2], res.data[3],
+						res.data[4], res.data[5], res.data[6], res.data[7]))
+			}
+		}
+		if int64(len(data)) > remaining {
+			data = data[:remaining]
+		}
+		if len(data) > 0 {
+			if _, err := dst.Write(data); err != nil {
+				return written, err
+			}
+			written += int64(len(data))
+			remaining -= int64(len(data))
+		}
+		if remaining <= 0 {
+			return written, nil
+		}
+		// A short/empty block means Telegram has no more data (EOF) — stop
+		// rather than spin waiting for blocks past the file's end.
+		if len(res.data) < chunkSize {
+			slog.Info("stream EOF (short chunk)", "video_id", videoID, "written", written)
+			return written, nil
+		}
+	}
+}
+
+// fetchBlock fetches a single aligned 1 MiB block at offset, bounded by
+// chunkTimeout. It returns the raw bytes (possibly short at EOF); callers do
+// the alignment/tail trimming.
+func fetchBlock(ctx context.Context, api *tg.Client, v *db.Video, offset int64) ([]byte, error) {
+	callCtx, cancel := context.WithTimeout(ctx, chunkTimeout)
+	defer cancel()
+	resp, err := api.UploadGetFile(callCtx, &tg.UploadGetFileRequest{
+		Precise: true,
+		Location: &tg.InputDocumentFileLocation{
+			ID:            v.TGDocID,
+			AccessHash:    v.AccessHash,
+			FileReference: v.FileReference,
+		},
+		Offset: offset,
+		Limit:  chunkSize,
+	})
+	if err != nil {
+		return nil, err
+	}
+	uf, ok := resp.(*tg.UploadFile)
+	if !ok {
+		return nil, fmt.Errorf("unexpected response type %T (CDN unsupported)", resp)
+	}
+	return uf.Bytes, nil
+}
+
+// streamSequential is the original one-block-at-a-time reader, kept for the
+// unknown-size path where the EOF offset isn't known up front.
+func (s *StreamServer) streamSequential(ctx context.Context, api *tg.Client, v *db.Video, start, end int64, dst io.Writer) error {
 	cursor := start
 	refreshed := false
 
