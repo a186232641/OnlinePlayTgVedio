@@ -63,9 +63,10 @@ phone/code/2FA-password into the in-flight gotd auth goroutine. SignUp is not su
   order doesn't matter — queries sort by `date`. A probe call first flags "stale access_hash / lost
   membership" (0 messages). Sync state is **in-memory only** (`Indexer.syncs` map), surfaced via
   `GET /channels/{id}/sync` with live `walked`/`imported`/`skipped`. A background scheduler
-  (`indexer/scheduler.go`, started in `main.go`) re-runs sync for every channel with
-  `last_indexed_at IS NOT NULL` every `SYNC_INTERVAL` (env, default 30m; 0/off disables) via the
-  same idempotent `SyncStart`. `MarkChannelIndexed` recomputes `video_count` via `COUNT(*)` — never
+  (`indexer/scheduler.go`, started in `main.go`) re-runs sync every `SYNC_INTERVAL` (env, default
+  30m; 0/off disables) for every channel that is `last_indexed_at IS NOT NULL AND auto_sync`
+  (per-channel opt-out, default on; manual `SyncStart` ignores it), via the same idempotent
+  `SyncStart`. `MarkChannelIndexed` recomputes `video_count` via `COUNT(*)` — never
   a per-run delta, or incremental syncs would clobber the total.
 
 **Streaming** (`internal/video/stream.go`): browser `Range: bytes=…` → backend aligns to 4KB
