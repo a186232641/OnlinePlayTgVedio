@@ -10,6 +10,7 @@ import (
 
 	"github.com/gotd/contrib/bg"
 	"github.com/gotd/contrib/middleware/floodwait"
+	"github.com/gotd/td/bin"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
 
@@ -17,6 +18,39 @@ import (
 	"github.com/hanfeilong/onlineplaytgvideo/internal/db"
 	"github.com/hanfeilong/onlineplaytgvideo/internal/tgsession"
 )
+
+// slowRPCThreshold: TG calls slower than this are logged so stalls are visible.
+const slowRPCThreshold = 3 * time.Second
+
+// rpcLogger is a telegram middleware that surfaces failed and slow MTProto
+// calls via slog. Without it a stuck upload.getFile / getMessages only ever
+// shows up as a generic "context canceled" once the browser gives up — hiding
+// flood-waits, DC migrations and connection stalls. Placed INSIDE the
+// floodwait waiter so it observes the raw per-attempt result (incl. FLOOD_WAIT)
+// before the waiter retries.
+type rpcLogger struct{ sessionID int64 }
+
+func (l rpcLogger) Handle(next tg.Invoker) telegram.InvokeFunc {
+	return func(ctx context.Context, input bin.Encoder, output bin.Decoder) error {
+		start := time.Now()
+		err := next.Invoke(ctx, input, output)
+		elapsed := time.Since(start)
+		switch {
+		case err != nil && !errors.Is(err, context.Canceled):
+			slog.Warn("tg rpc failed",
+				"session_id", l.sessionID,
+				"method", fmt.Sprintf("%T", input),
+				"elapsed_ms", elapsed.Milliseconds(),
+				"err", err)
+		case elapsed > slowRPCThreshold:
+			slog.Info("tg rpc slow",
+				"session_id", l.sessionID,
+				"method", fmt.Sprintf("%T", input),
+				"elapsed_ms", elapsed.Milliseconds())
+		}
+		return err
+	}
+}
 
 // Manager owns one persistent gotd client per active tg_session row. A user
 // may bind multiple TG accounts; each gets its own client keyed by session id.
@@ -98,6 +132,7 @@ func (m *Manager) Start(ctx context.Context, userID, sessionID int64) error {
 		SessionStorage: storage,
 		Middlewares: []telegram.Middleware{
 			waiter,
+			rpcLogger{sessionID: sessionID},
 		},
 	})
 

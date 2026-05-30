@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
@@ -30,6 +31,11 @@ const (
 	// maxStream caps the unknown-size path. Bigger than any real video; used
 	// as a sentinel "stream until TG returns empty (EOF)".
 	maxStream = 1 << 60
+	// chunkTimeout bounds a single upload.getFile call. A stuck TG connection
+	// (dead/zombie session, unreachable file DC) otherwise hangs until the
+	// browser gives up tens of seconds later, freezing playback with no error.
+	// Failing fast surfaces a logged DeadlineExceeded instead.
+	chunkTimeout = 30 * time.Second
 )
 
 // StreamServer wires together the dependencies needed to serve a TG video
@@ -187,7 +193,9 @@ func (s *StreamServer) streamRange(ctx context.Context, api *tg.Client, v *db.Vi
 			Offset: alignedOffset,
 			Limit:  chunkSize,
 		}
-		resp, err := api.UploadGetFile(ctx, req)
+		callCtx, cancel := context.WithTimeout(ctx, chunkTimeout)
+		resp, err := api.UploadGetFile(callCtx, req)
+		cancel()
 		if err != nil {
 			slog.Warn("upload.getFile failed",
 				"video_id", v.ID, "offset", alignedOffset, "limit", chunkSize, "err", err)

@@ -5,12 +5,18 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/gotd/td/tg"
 
 	"github.com/hanfeilong/onlineplaytgvideo/internal/db"
 	"github.com/hanfeilong/onlineplaytgvideo/internal/tgmanager"
 )
+
+// resolveTimeout bounds the channels.getMessages call that resolves a video's
+// fresh file locator. A stuck TG connection otherwise hangs this until the
+// browser disconnects, so the video never starts.
+const resolveTimeout = 20 * time.Second
 
 // RefreshFileReference re-fetches the original message via the same TG
 // session that owns the channel, extracts the fresh Document.FileReference,
@@ -28,7 +34,9 @@ func RefreshFileReference(ctx context.Context, database *db.DB, mgr *tgmanager.M
 		return fmt.Errorf("tg client: %w", err)
 	}
 
-	msgs, err := fetchMessages(ctx, cli.API, ch, int(v.TGMsgID))
+	fetchCtx, cancel := context.WithTimeout(ctx, resolveTimeout)
+	defer cancel()
+	msgs, err := fetchMessages(fetchCtx, cli.API, ch, int(v.TGMsgID))
 	if err != nil {
 		return err
 	}
