@@ -43,6 +43,7 @@ type Channel struct {
 	LastIndexedAt   *time.Time
 	GroupByStreamer bool
 	HistoryComplete bool
+	AutoSync        bool
 }
 
 // All columns are qualified with the c.* alias because some queries
@@ -53,7 +54,7 @@ const channelCols = `
     COALESCE(c.username, ''), COALESCE(c.photo_path, ''),
     c.dialog_kind, c.parent_channel_id, c.topic_id,
     c.index_enabled, COALESCE(c.index_status, 'idle'), COALESCE(c.index_error, ''),
-    c.video_count, c.last_indexed_at, c.group_by_streamer, c.history_complete
+    c.video_count, c.last_indexed_at, c.group_by_streamer, c.history_complete, c.auto_sync
 `
 
 func scanChannel(row pgx.Row) (*Channel, error) {
@@ -63,7 +64,7 @@ func scanChannel(row pgx.Row) (*Channel, error) {
 		&c.Username, &c.PhotoPath,
 		&c.DialogKind, &c.ParentChannelID, &c.TopicID,
 		&c.IndexEnabled, &c.IndexStatus, &c.IndexError,
-		&c.VideoCount, &c.LastIndexedAt, &c.GroupByStreamer, &c.HistoryComplete,
+		&c.VideoCount, &c.LastIndexedAt, &c.GroupByStreamer, &c.HistoryComplete, &c.AutoSync,
 	); err != nil {
 		return nil, err
 	}
@@ -156,15 +157,16 @@ type AutoSyncRef struct {
 	UserID    int64
 }
 
-// ChannelsForAutoSync lists every channel that has been synced/imported at
-// least once (last_indexed_at IS NOT NULL) whose session is not revoked, oldest
-// first so the most stale gets refreshed earliest. Spans all users.
+// ChannelsForAutoSync lists every channel eligible for the background sweep:
+// synced/imported at least once (last_indexed_at IS NOT NULL), auto_sync still
+// on, session not revoked. Oldest-indexed first so the most stale refreshes
+// earliest. Spans all users.
 func (d *DB) ChannelsForAutoSync(ctx context.Context) ([]AutoSyncRef, error) {
 	rows, err := d.Query(ctx, `
         SELECT c.id, c.user_id
         FROM channels c
         JOIN tg_sessions s ON s.id = c.tg_session_id
-        WHERE c.last_indexed_at IS NOT NULL AND s.status <> 'revoked'
+        WHERE c.last_indexed_at IS NOT NULL AND c.auto_sync AND s.status <> 'revoked'
         ORDER BY c.last_indexed_at ASC
     `)
 	if err != nil {
@@ -204,6 +206,21 @@ func (d *DB) ChannelByID(ctx context.Context, id, userID int64) (*Channel, error
 func (d *DB) SetChannelGrouping(ctx context.Context, channelID, userID int64, enabled bool) error {
 	tag, err := d.Exec(ctx, `
         UPDATE channels SET group_by_streamer=$3 WHERE id=$1 AND user_id=$2
+    `, channelID, userID, enabled)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetChannelAutoSync toggles whether the background scheduler includes this
+// channel. Scoped by user. Returns ErrNotFound if no such channel for the user.
+func (d *DB) SetChannelAutoSync(ctx context.Context, channelID, userID int64, enabled bool) error {
+	tag, err := d.Exec(ctx, `
+        UPDATE channels SET auto_sync=$3 WHERE id=$1 AND user_id=$2
     `, channelID, userID, enabled)
 	if err != nil {
 		return err

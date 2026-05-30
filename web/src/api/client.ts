@@ -48,6 +48,7 @@ export interface Channel {
   video_count: number;
   last_indexed_at?: string;
   group_by_streamer: boolean;
+  auto_sync: boolean;
 }
 
 export interface Streamer {

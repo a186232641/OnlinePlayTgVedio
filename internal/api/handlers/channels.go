@@ -27,6 +27,7 @@ type channelDTO struct {
 	VideoCount      int    `json:"video_count"`
 	LastIndexedAt   string `json:"last_indexed_at,omitempty"`
 	GroupByStreamer bool   `json:"group_by_streamer"`
+	AutoSync        bool   `json:"auto_sync"`
 }
 
 func channelToDTO(c db.Channel) channelDTO {
@@ -38,6 +39,7 @@ func channelToDTO(c db.Channel) channelDTO {
 		Username:        c.Username,
 		VideoCount:      c.VideoCount,
 		GroupByStreamer: c.GroupByStreamer,
+		AutoSync:        c.AutoSync,
 	}
 	if c.LastIndexedAt != nil {
 		dto.LastIndexedAt = c.LastIndexedAt.Format("2006-01-02T15:04:05Z07:00")
@@ -77,6 +79,7 @@ func (h *ChannelsHandlers) UpdateChannel(w http.ResponseWriter, r *http.Request)
 	}
 	var body struct {
 		GroupByStreamer *bool `json:"group_by_streamer"`
+		AutoSync        *bool `json:"auto_sync"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpx.WriteError(w, httpx.Errorf(http.StatusBadRequest, "bad_json", "invalid JSON body"))
@@ -84,6 +87,16 @@ func (h *ChannelsHandlers) UpdateChannel(w http.ResponseWriter, r *http.Request)
 	}
 	if body.GroupByStreamer != nil {
 		if err := h.DB.SetChannelGrouping(r.Context(), cid, uid, *body.GroupByStreamer); err != nil {
+			if err == db.ErrNotFound {
+				httpx.WriteError(w, httpx.Errorf(http.StatusNotFound, "not_found", "channel not found"))
+				return
+			}
+			httpx.WriteError(w, err)
+			return
+		}
+	}
+	if body.AutoSync != nil {
+		if err := h.DB.SetChannelAutoSync(r.Context(), cid, uid, *body.AutoSync); err != nil {
 			if err == db.ErrNotFound {
 				httpx.WriteError(w, httpx.Errorf(http.StatusNotFound, "not_found", "channel not found"))
 				return

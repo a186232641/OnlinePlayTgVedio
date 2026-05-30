@@ -147,6 +147,7 @@ function ChannelRow({
   importing: boolean;
   clearing: boolean;
 }) {
+  const qc = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const sync = useQuery<SyncState>({
     queryKey: ["sync-status", c.id],
@@ -154,6 +155,12 @@ function ChannelRow({
     refetchInterval: (q) => (q.state.data?.running ? 2000 : false),
   });
   const isSyncing = !!sync.data?.running;
+
+  const autoSync = useMutation({
+    mutationFn: (val: boolean) => api.patch(`/api/channels/${c.id}`, { auto_sync: val }),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["channels"] }),
+    onError: (e: Error) => alert(`切换自动同步失败: ${e.message}`),
+  });
 
   return (
     <div className="rounded bg-slate-900 border border-slate-800 flex items-center gap-3 px-4 py-2.5">
@@ -181,6 +188,30 @@ function ChannelRow({
         )}
       </div>
       <div className="text-xs text-slate-500 w-20 text-right">{c.video_count} 视频</div>
+      <label
+        className="flex items-center gap-1.5 text-xs text-slate-400 select-none shrink-0"
+        title="是否纳入后台定时自动同步(手动「TG 同步」不受此开关影响)"
+      >
+        自动
+        <button
+          type="button"
+          role="switch"
+          aria-checked={c.auto_sync}
+          disabled={autoSync.isPending}
+          onClick={() => autoSync.mutate(!c.auto_sync)}
+          className={
+            "relative w-9 h-5 rounded-full transition-colors disabled:opacity-50 " +
+            (c.auto_sync ? "bg-emerald-600" : "bg-slate-700")
+          }
+        >
+          <span
+            className={
+              "absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform " +
+              (c.auto_sync ? "translate-x-4" : "")
+            }
+          />
+        </button>
+      </label>
       <input
         ref={fileInputRef}
         type="file"
