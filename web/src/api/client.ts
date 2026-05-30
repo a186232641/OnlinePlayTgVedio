@@ -47,6 +47,12 @@ export interface Channel {
   username?: string;
   video_count: number;
   last_indexed_at?: string;
+  group_by_streamer: boolean;
+}
+
+export interface Streamer {
+  streamer: string; // "" = filenames not matching the {streamer}-DATE pattern
+  count: number;
 }
 
 // Video field names mirror TG Desktop's JSON export (snake_case as-is).

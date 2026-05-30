@@ -46,7 +46,11 @@ function playlistRequest(p: URLSearchParams): string | null {
     return `/api/videos/search?${qs}`;
   }
   if (ch) {
-    return `/api/channels/${ch}/videos?${limitQS}`;
+    const qs = new URLSearchParams({ limit: String(PLAYLIST_PAGE_SIZE) });
+    // Grouped channel view links carry ?streamer=... (possibly empty = the
+    // "其它" bucket) — keep the playlist scoped to that streamer.
+    if (p.has("streamer")) qs.set("streamer", p.get("streamer") ?? "");
+    return `/api/channels/${ch}/videos?${qs}`;
   }
   return null;
 }
