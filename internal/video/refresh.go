@@ -34,9 +34,28 @@ func RefreshFileReference(ctx context.Context, database *db.DB, mgr *tgmanager.M
 		return fmt.Errorf("tg client: %w", err)
 	}
 
-	fetchCtx, cancel := context.WithTimeout(ctx, resolveTimeout)
-	defer cancel()
-	msgs, err := fetchMessages(fetchCtx, cli.API, ch, int(v.TGMsgID))
+	// getMessages goes to the channel's DC; like block fetches, the first hit
+	// on a not-yet-connected DC can time out on a flaky link, so retry.
+	var msgs []tg.MessageClass
+	for attempt := 0; attempt < fetchAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-time.After(retryBackoff):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		fetchCtx, cancel := context.WithTimeout(ctx, resolveTimeout)
+		msgs, err = fetchMessages(fetchCtx, cli.API, ch, int(v.TGMsgID))
+		cancel()
+		if err == nil {
+			break
+		}
+		if !transient(err) {
+			return err
+		}
+		slog.Warn("resolve retry", "video_id", v.ID, "tg_msg_id", v.TGMsgID, "attempt", attempt+1, "err", err)
+	}
 	if err != nil {
 		return err
 	}

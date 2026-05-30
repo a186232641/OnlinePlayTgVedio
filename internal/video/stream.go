@@ -31,11 +31,17 @@ const (
 	// maxStream caps the unknown-size path. Bigger than any real video; used
 	// as a sentinel "stream until TG returns empty (EOF)".
 	maxStream = 1 << 60
-	// chunkTimeout bounds a single upload.getFile call. A stuck TG connection
+	// chunkTimeout bounds a single upload.getFile attempt. A stuck TG connection
 	// (dead/zombie session, unreachable file DC) otherwise hangs until the
 	// browser gives up tens of seconds later, freezing playback with no error.
 	// Failing fast surfaces a logged DeadlineExceeded instead.
-	chunkTimeout = 30 * time.Second
+	chunkTimeout = 20 * time.Second
+	// fetchAttempts / retryBackoff: retry a transient block fetch this many
+	// times. The first access to a file's DC must dial it, which intermittently
+	// times out on a flaky link; a retry usually lands the (then-cached) DC
+	// connection. Worst case for a truly dead DC ≈ fetchAttempts·chunkTimeout.
+	fetchAttempts = 3
+	retryBackoff  = time.Second
 	// readAheadWorkers is how many 1 MiB blocks a bounded Range request fetches
 	// from Telegram concurrently. Overlapping round-trips lifts throughput on
 	// large videos; kept small so a single playback doesn't hammer TG (FLOOD).
@@ -311,12 +317,16 @@ func streamWindowed(ctx context.Context, fetch func(context.Context, int64) ([]b
 }
 
 // fetchBlock fetches a single aligned 1 MiB block at offset, bounded by
-// chunkTimeout. It returns the raw bytes (possibly short at EOF); callers do
-// the alignment/tail trimming.
+// chunkTimeout per attempt and retried on transient failures. It returns the
+// raw bytes (possibly short at EOF); callers do the alignment/tail trimming.
+//
+// Retry exists because file blocks live on different Telegram DCs, and the
+// first access to a not-yet-connected DC must export auth + dial it — a step
+// that intermittently times out on a flaky VPS↔TG link ("create connection to
+// DC N … i/o timeout"). gotd caches a DC connection once established, so a
+// retry that lands the connection makes every later block on that DC fast.
 func fetchBlock(ctx context.Context, api *tg.Client, v *db.Video, offset int64) ([]byte, error) {
-	callCtx, cancel := context.WithTimeout(ctx, chunkTimeout)
-	defer cancel()
-	resp, err := api.UploadGetFile(callCtx, &tg.UploadGetFileRequest{
+	req := &tg.UploadGetFileRequest{
 		Precise: true,
 		Location: &tg.InputDocumentFileLocation{
 			ID:            v.TGDocID,
@@ -325,15 +335,46 @@ func fetchBlock(ctx context.Context, api *tg.Client, v *db.Video, offset int64) 
 		},
 		Offset: offset,
 		Limit:  chunkSize,
-	})
-	if err != nil {
-		return nil, err
 	}
-	uf, ok := resp.(*tg.UploadFile)
-	if !ok {
-		return nil, fmt.Errorf("unexpected response type %T (CDN unsupported)", resp)
+	var lastErr error
+	for attempt := 0; attempt < fetchAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-time.After(retryBackoff):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		callCtx, cancel := context.WithTimeout(ctx, chunkTimeout)
+		resp, err := api.UploadGetFile(callCtx, req)
+		cancel()
+		if err == nil {
+			uf, ok := resp.(*tg.UploadFile)
+			if !ok {
+				return nil, fmt.Errorf("unexpected response type %T (CDN unsupported)", resp)
+			}
+			return uf.Bytes, nil
+		}
+		// Caller gone, or a stale ref the upstream loop must refresh — don't retry.
+		if !transient(err) {
+			return nil, err
+		}
+		lastErr = err
+		slog.Warn("fetchBlock retry",
+			"video_id", v.ID, "offset", offset, "attempt", attempt+1, "err", err)
 	}
-	return uf.Bytes, nil
+	return nil, lastErr
+}
+
+// transient reports whether err is worth retrying: a timeout / connection blip
+// (incl. our per-call deadline and cross-DC connect failures), but NOT a caller
+// cancellation (client disconnected) or a stale file_reference (the caller
+// handles that by refreshing the locator).
+func transient(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	return !tgerr.Is(err, "FILE_REFERENCE_EXPIRED")
 }
 
 // streamSequential is the original one-block-at-a-time reader, kept for the
