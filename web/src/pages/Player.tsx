@@ -176,7 +176,7 @@ export function Player() {
     setStreamDiag(null);
 
     (async () => {
-      let kind: "flv" | "native" = "native";
+      let kind: "flv" | "mpegts" | "native" = "native";
       let hint = "";
       try {
         const r = await fetch(url, {
@@ -191,6 +191,10 @@ export function Player() {
             hint = "FLV — mpegts.js";
           } else if (b.length >= 8 && b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70) {
             hint = "MP4 (ftyp)";
+          } else if (b.length >= 1 && b[0] === 0x47) {
+            // MPEG-TS sync byte (0x47) at offset 0 — naked .ts stream.
+            kind = "mpegts";
+            hint = "MPEG-TS — mpegts.js";
           } else {
             hint = "未识别容器,试试 native";
           }
@@ -201,13 +205,13 @@ export function Player() {
       if (cancelled) return;
       setContainerHint(hint);
 
-      if (kind === "flv") {
+      if (kind === "flv" || kind === "mpegts") {
         if (!mpegts.getFeatureList().mseLivePlayback) {
-          setMediaErr("浏览器不支持 MSE — FLV 视频无法播放");
+          setMediaErr("浏览器不支持 MSE — 该视频(FLV/TS)无法播放");
           return;
         }
         const player = mpegts.createPlayer({
-          type: "flv",
+          type: kind, // "flv" | "mpegts"
           url,
           isLive: false,
           cors: true,
