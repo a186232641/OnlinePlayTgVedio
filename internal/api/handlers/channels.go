@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 
@@ -18,28 +19,117 @@ type ChannelsHandlers struct {
 }
 
 type channelDTO struct {
-	ID            int64  `json:"id"`
-	TGSessionID   int64  `json:"tg_session_id"`
-	TGChannelID   int64  `json:"tg_channel_id"`
-	Title         string `json:"title"`
-	Username      string `json:"username,omitempty"`
-	VideoCount    int    `json:"video_count"`
-	LastIndexedAt string `json:"last_indexed_at,omitempty"`
+	ID              int64  `json:"id"`
+	TGSessionID     int64  `json:"tg_session_id"`
+	TGChannelID     int64  `json:"tg_channel_id"`
+	Title           string `json:"title"`
+	Username        string `json:"username,omitempty"`
+	VideoCount      int    `json:"video_count"`
+	LastIndexedAt   string `json:"last_indexed_at,omitempty"`
+	GroupByStreamer bool   `json:"group_by_streamer"`
 }
 
 func channelToDTO(c db.Channel) channelDTO {
 	dto := channelDTO{
-		ID:          c.ID,
-		TGSessionID: c.TGSessionID,
-		TGChannelID: c.TGChannelID,
-		Title:       c.Title,
-		Username:    c.Username,
-		VideoCount:  c.VideoCount,
+		ID:              c.ID,
+		TGSessionID:     c.TGSessionID,
+		TGChannelID:     c.TGChannelID,
+		Title:           c.Title,
+		Username:        c.Username,
+		VideoCount:      c.VideoCount,
+		GroupByStreamer: c.GroupByStreamer,
 	}
 	if c.LastIndexedAt != nil {
 		dto.LastIndexedAt = c.LastIndexedAt.Format("2006-01-02T15:04:05Z07:00")
 	}
 	return dto
+}
+
+// Get returns a single channel (used by the channel detail page to read title
+// and the group_by_streamer flag).
+//
+// GET /api/channels/:id
+func (h *ChannelsHandlers) Get(w http.ResponseWriter, r *http.Request) {
+	uid, _ := web.UserIDFromContext(r.Context())
+	cid, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		httpx.WriteError(w, httpx.Errorf(http.StatusBadRequest, "bad_id", "invalid channel id"))
+		return
+	}
+	c, err := h.DB.ChannelByID(r.Context(), cid, uid)
+	if err != nil {
+		httpx.WriteError(w, httpx.Errorf(http.StatusNotFound, "not_found", "channel not found"))
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"channel": channelToDTO(*c)})
+}
+
+// UpdateChannel patches mutable per-channel settings (currently just the
+// group_by_streamer toggle). Only provided fields are applied.
+//
+// PATCH /api/channels/:id   body: {"group_by_streamer": true}
+func (h *ChannelsHandlers) UpdateChannel(w http.ResponseWriter, r *http.Request) {
+	uid, _ := web.UserIDFromContext(r.Context())
+	cid, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		httpx.WriteError(w, httpx.Errorf(http.StatusBadRequest, "bad_id", "invalid channel id"))
+		return
+	}
+	var body struct {
+		GroupByStreamer *bool `json:"group_by_streamer"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpx.WriteError(w, httpx.Errorf(http.StatusBadRequest, "bad_json", "invalid JSON body"))
+		return
+	}
+	if body.GroupByStreamer != nil {
+		if err := h.DB.SetChannelGrouping(r.Context(), cid, uid, *body.GroupByStreamer); err != nil {
+			if err == db.ErrNotFound {
+				httpx.WriteError(w, httpx.Errorf(http.StatusNotFound, "not_found", "channel not found"))
+				return
+			}
+			httpx.WriteError(w, err)
+			return
+		}
+	}
+	c, err := h.DB.ChannelByID(r.Context(), cid, uid)
+	if err != nil {
+		httpx.WriteError(w, httpx.Errorf(http.StatusNotFound, "not_found", "channel not found"))
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"channel": channelToDTO(*c)})
+}
+
+type streamerDTO struct {
+	Streamer string `json:"streamer"` // "" = filenames not matching the pattern
+	Count    int64  `json:"count"`
+}
+
+// Streamers returns the per-streamer video-count breakdown for a channel,
+// busiest first. Used by the grouped channel view.
+//
+// GET /api/channels/:id/streamers
+func (h *ChannelsHandlers) Streamers(w http.ResponseWriter, r *http.Request) {
+	uid, _ := web.UserIDFromContext(r.Context())
+	cid, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		httpx.WriteError(w, httpx.Errorf(http.StatusBadRequest, "bad_id", "invalid channel id"))
+		return
+	}
+	if _, err := h.DB.ChannelByID(r.Context(), cid, uid); err != nil {
+		httpx.WriteError(w, httpx.Errorf(http.StatusNotFound, "not_found", "channel not found"))
+		return
+	}
+	rows, err := h.DB.ListStreamers(r.Context(), cid, uid)
+	if err != nil {
+		httpx.WriteError(w, err)
+		return
+	}
+	out := make([]streamerDTO, 0, len(rows))
+	for _, s := range rows {
+		out = append(out, streamerDTO{Streamer: s.Streamer, Count: s.Count})
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"streamers": out})
 }
 
 // List returns the current user's channels for browsing/management. Forum
@@ -194,12 +284,16 @@ func (h *ChannelsHandlers) ChannelVideos(w http.ResponseWriter, r *http.Request)
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offsetID, _ := strconv.ParseInt(r.URL.Query().Get("offset_id"), 10, 64)
 	order := r.URL.Query().Get("order")
+	// streamer filter: present (even empty, = the NULL bucket) ⇒ filter on it.
+	streamerFilter := r.URL.Query().Has("streamer")
 	vids, err := h.DB.ListVideos(r.Context(), db.ListVideosOpts{
-		UserID:    uid,
-		ChannelID: cid,
-		Limit:     limit,
-		OffsetID:  offsetID,
-		OrderBy:   order,
+		UserID:         uid,
+		ChannelID:      cid,
+		Limit:          limit,
+		OffsetID:       offsetID,
+		OrderBy:        order,
+		StreamerFilter: streamerFilter,
+		Streamer:       r.URL.Query().Get("streamer"),
 	})
 	if err != nil {
 		httpx.WriteError(w, err)
@@ -210,8 +304,9 @@ func (h *ChannelsHandlers) ChannelVideos(w http.ResponseWriter, r *http.Request)
 		out = append(out, videoToDTO(v))
 	}
 	resp := map[string]any{"videos": out}
-	// total only on first page (cheap on followups too but pointless to recompute)
-	if offsetID == 0 {
+	// total only on first page, and only for the whole channel — under a streamer
+	// filter the per-streamer count comes from the /streamers endpoint instead.
+	if offsetID == 0 && !streamerFilter {
 		if total, err := h.DB.CountVideosByChannel(r.Context(), uid, cid); err == nil {
 			resp["total"] = total
 		}

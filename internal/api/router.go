@@ -74,8 +74,11 @@ func NewRouter(d Deps) http.Handler {
 
 			r.Route("/channels", func(r chi.Router) {
 				r.Get("/", chH.List)
+				r.Get("/{id}", chH.Get)
+				r.Patch("/{id}", chH.UpdateChannel)
 				r.Get("/{id}/videos", chH.ChannelVideos)
 				r.Delete("/{id}/videos", chH.ClearVideos)
+				r.Get("/{id}/streamers", chH.Streamers)
 				r.Post("/{id}/import", chH.Import)
 				r.Post("/{id}/sync", chH.SyncStart)
 				r.Get("/{id}/sync", chH.SyncStatus)

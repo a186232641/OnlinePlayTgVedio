@@ -41,6 +41,7 @@ type Channel struct {
 	IndexError      string
 	VideoCount      int
 	LastIndexedAt   *time.Time
+	GroupByStreamer bool
 }
 
 // All columns are qualified with the c.* alias because some queries
@@ -51,7 +52,7 @@ const channelCols = `
     COALESCE(c.username, ''), COALESCE(c.photo_path, ''),
     c.dialog_kind, c.parent_channel_id, c.topic_id,
     c.index_enabled, COALESCE(c.index_status, 'idle'), COALESCE(c.index_error, ''),
-    c.video_count, c.last_indexed_at
+    c.video_count, c.last_indexed_at, c.group_by_streamer
 `
 
 func scanChannel(row pgx.Row) (*Channel, error) {
@@ -61,7 +62,7 @@ func scanChannel(row pgx.Row) (*Channel, error) {
 		&c.Username, &c.PhotoPath,
 		&c.DialogKind, &c.ParentChannelID, &c.TopicID,
 		&c.IndexEnabled, &c.IndexStatus, &c.IndexError,
-		&c.VideoCount, &c.LastIndexedAt,
+		&c.VideoCount, &c.LastIndexedAt, &c.GroupByStreamer,
 	); err != nil {
 		return nil, err
 	}
@@ -188,6 +189,54 @@ func (d *DB) ChannelByID(ctx context.Context, id, userID int64) (*Channel, error
 		return nil, err
 	}
 	return c, nil
+}
+
+// SetChannelGrouping toggles the per-channel "group by streamer" flag. Scoped
+// by user so one user can't flip another's channel. Returns ErrNotFound if no
+// such channel for this user.
+func (d *DB) SetChannelGrouping(ctx context.Context, channelID, userID int64, enabled bool) error {
+	tag, err := d.Exec(ctx, `
+        UPDATE channels SET group_by_streamer=$3 WHERE id=$1 AND user_id=$2
+    `, channelID, userID, enabled)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// StreamerCount is one row of the per-channel streamer breakdown. Streamer is
+// "" for videos whose filename doesn't match the "{streamer}-DATE" pattern.
+type StreamerCount struct {
+	Streamer string
+	Count    int64
+}
+
+// ListStreamers returns the distinct streamers in a channel with their video
+// counts, busiest first. Backed by idx_videos_channel_streamer.
+func (d *DB) ListStreamers(ctx context.Context, channelID, userID int64) ([]StreamerCount, error) {
+	rows, err := d.Query(ctx, `
+        SELECT COALESCE(streamer, ''), count(*)
+        FROM videos
+        WHERE channel_id=$1 AND user_id=$2
+        GROUP BY streamer
+        ORDER BY count(*) DESC, COALESCE(streamer, '')
+    `, channelID, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []StreamerCount
+	for rows.Next() {
+		var s StreamerCount
+		if err := rows.Scan(&s.Streamer, &s.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
 }
 
 func (d *DB) UpdateChannelPhoto(ctx context.Context, channelID int64, path string) error {

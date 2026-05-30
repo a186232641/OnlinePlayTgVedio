@@ -191,6 +191,12 @@ type ListVideosOpts struct {
 	OffsetID  int64 // keyset cursor (smallest id from previous page)
 	OrderBy   string
 	FavOnly   bool
+
+	// StreamerFilter enables filtering by Streamer. When true, Streamer=="" means
+	// "the NULL bucket" (filenames not matching the streamer pattern). When
+	// false, Streamer is ignored.
+	StreamerFilter bool
+	Streamer       string
 }
 
 func (d *DB) ListVideos(ctx context.Context, opt ListVideosOpts) ([]Video, error) {
@@ -207,6 +213,14 @@ func (d *DB) ListVideos(ctx context.Context, opt ListVideosOpts) ([]Video, error
 	if opt.OffsetID > 0 {
 		args = append(args, opt.OffsetID)
 		where = append(where, "v.id < $"+itoa(len(args)))
+	}
+	if opt.StreamerFilter {
+		if opt.Streamer == "" {
+			where = append(where, "v.streamer IS NULL")
+		} else {
+			args = append(args, opt.Streamer)
+			where = append(where, "v.streamer = $"+itoa(len(args)))
+		}
 	}
 	if opt.FavOnly {
 		q += ` JOIN favorites f ON f.video_id=v.id AND f.user_id=v.user_id `
