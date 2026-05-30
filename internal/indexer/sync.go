@@ -296,6 +296,11 @@ func videoFromTGMessage(ch *db.Channel, msg *tg.Message) *db.Video {
 		mediaType = "animation"
 	case strings.HasPrefix(strings.ToLower(doc.MimeType), "video/"):
 		mediaType = "video_file"
+	case hasVideoExt(fileName):
+		// Plenty of large channels post videos as plain documents with no
+		// video attribute and a generic mime (e.g. application/octet-stream).
+		// Mirror the JSON importer's extension fallback so sync doesn't miss them.
+		mediaType = "video_file"
 	default:
 		return nil
 	}
@@ -331,6 +336,21 @@ func videoFromTGMessage(ch *db.Channel, msg *tg.Message) *db.Video {
 		AccessHash:    doc.AccessHash,
 		FileReference: doc.FileReference,
 	}
+}
+
+// videoFileExts mirrors the JSON importer's list (handlers.videoExts): used as
+// a last-resort signal when a document carries no video attribute and a
+// non-video mime type.
+var videoFileExts = []string{".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".flv", ".ts", ".mpeg", ".mpg", ".3gp"}
+
+func hasVideoExt(name string) bool {
+	low := strings.ToLower(name)
+	for _, ext := range videoFileExts {
+		if strings.HasSuffix(low, ext) {
+			return true
+		}
+	}
+	return false
 }
 
 func inputPeerForChannel(c *db.Channel) (tg.InputPeerClass, error) {
