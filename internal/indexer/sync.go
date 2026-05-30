@@ -94,7 +94,7 @@ func (i *Indexer) runSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
 			s.Phase = ""
 			s.FinishedAt = time.Now()
 		})
-		_ = i.db.MarkChannelIndexed(ctx, ch.ID, st.snapshot().Imported)
+		_ = i.db.MarkChannelIndexed(ctx, ch.ID)
 	}()
 
 	peer, err := inputPeerForChannel(ch)

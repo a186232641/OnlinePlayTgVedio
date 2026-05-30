@@ -262,7 +262,7 @@ func (h *ChannelsHandlers) ClearVideos(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, err)
 		return
 	}
-	_ = h.DB.MarkChannelIndexed(r.Context(), cid, 0)
+	_ = h.DB.MarkChannelIndexed(r.Context(), cid)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": n})
 }
 

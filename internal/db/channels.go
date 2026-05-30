@@ -97,13 +97,19 @@ func (d *DB) UpsertChannel(ctx context.Context, c *Channel) (int64, error) {
 	return id, nil
 }
 
-func (d *DB) MarkChannelIndexed(ctx context.Context, channelID int64, videoCount int) error {
+// MarkChannelIndexed stamps last_indexed_at and recomputes video_count from the
+// actual videos rows. It must NOT be passed a per-run delta: an incremental sync
+// imports only the new messages, so writing that delta would clobber the real
+// total. Recounting keeps the number correct after full imports, incremental
+// syncs, and clears alike.
+func (d *DB) MarkChannelIndexed(ctx context.Context, channelID int64) error {
 	_, err := d.Exec(ctx, `
         UPDATE channels
-        SET video_count=$1, last_indexed_at=NOW(),
+        SET video_count = (SELECT count(*) FROM videos WHERE channel_id=$1),
+            last_indexed_at=NOW(),
             index_status='idle', index_error=NULL
-        WHERE id=$2
-    `, videoCount, channelID)
+        WHERE id=$1
+    `, channelID)
 	return err
 }
 

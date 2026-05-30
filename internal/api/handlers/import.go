@@ -235,7 +235,7 @@ func (h *ChannelsHandlers) Import(w http.ResponseWriter, r *http.Request) {
 		imported++
 	}
 
-	if err := h.DB.MarkChannelIndexed(r.Context(), cid, imported); err != nil {
+	if err := h.DB.MarkChannelIndexed(r.Context(), cid); err != nil {
 		httpx.WriteError(w, err)
 		return
 	}
