@@ -59,7 +59,12 @@ phone/code/2FA-password into the in-flight gotd auth goroutine. SignUp is not su
   (recent refactor): Phase 1 walks newest→oldest into memory until it hits `maxSeen`, Phase 2
   reverses and writes oldest→newest so DB insert order matches Telegram chronology. A probe call
   first distinguishes "stale access_hash / lost membership" (0 messages) from "already up to date".
-  Sync state is **in-memory only** (`Indexer.syncs` map), surfaced via `GET /channels/{id}/sync`.
+  Sync state is **in-memory only** (`Indexer.syncs` map), surfaced via `GET /channels/{id}/sync`
+  with a `phase` ("fetching"/"writing") + `walked`/`total` progress (the fetch phase doesn't move
+  imported/skipped, so `walked` is the live signal). A background scheduler
+  (`indexer/scheduler.go`, started in `main.go`) re-runs an incremental sync for every channel with
+  `last_indexed_at IS NOT NULL` every `SYNC_INTERVAL` (env, default 30m; 0/off disables) by calling
+  the same idempotent `SyncStart`.
 
 **Streaming** (`internal/video/stream.go`): browser `Range: bytes=…` → backend aligns to 4KB
 boundaries and loops `tg.Client.UploadGetFile(Precise=true)` in 1MiB chunks, trimming the
