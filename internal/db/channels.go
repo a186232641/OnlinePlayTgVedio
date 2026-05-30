@@ -142,6 +142,38 @@ func (d *DB) ListChannels(ctx context.Context, opt ListChannelsOpts) ([]Channel,
 	return out, rows.Err()
 }
 
+// AutoSyncRef is the minimal handle the scheduler needs to call SyncStart.
+type AutoSyncRef struct {
+	ChannelID int64
+	UserID    int64
+}
+
+// ChannelsForAutoSync lists every channel that has been synced/imported at
+// least once (last_indexed_at IS NOT NULL) whose session is not revoked, oldest
+// first so the most stale gets refreshed earliest. Spans all users.
+func (d *DB) ChannelsForAutoSync(ctx context.Context) ([]AutoSyncRef, error) {
+	rows, err := d.Query(ctx, `
+        SELECT c.id, c.user_id
+        FROM channels c
+        JOIN tg_sessions s ON s.id = c.tg_session_id
+        WHERE c.last_indexed_at IS NOT NULL AND s.status <> 'revoked'
+        ORDER BY c.last_indexed_at ASC
+    `)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AutoSyncRef
+	for rows.Next() {
+		var ref AutoSyncRef
+		if err := rows.Scan(&ref.ChannelID, &ref.UserID); err != nil {
+			return nil, err
+		}
+		out = append(out, ref)
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) ChannelByID(ctx context.Context, id, userID int64) (*Channel, error) {
 	row := d.QueryRow(ctx, `
         SELECT `+channelCols+`

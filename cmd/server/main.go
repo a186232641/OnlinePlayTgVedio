@@ -52,6 +52,7 @@ func main() {
 	defer tgMgr.Shutdown()
 
 	idx := indexer.New(cfg, database, tgMgr)
+	idx.StartScheduler(rootCtx, cfg.SyncInterval)
 
 	cacheMgr := cache.New(cfg, database, tgMgr)
 	if err := cacheMgr.Start(rootCtx); err != nil {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -23,6 +24,10 @@ type Config struct {
 
 	CacheDir   string
 	CacheCapGB int64
+
+	// SyncInterval is how often the background scheduler re-runs an incremental
+	// TG sync for every already-synced channel. 0 disables auto-sync.
+	SyncInterval time.Duration
 }
 
 func Load() (*Config, error) {
@@ -76,7 +81,30 @@ func Load() (*Config, error) {
 		c.CacheCapGB = n
 	}
 
+	si, err := parseSyncInterval(env("SYNC_INTERVAL", "30m"))
+	if err != nil {
+		return nil, fmt.Errorf("SYNC_INTERVAL: %w", err)
+	}
+	c.SyncInterval = si
+
 	return c, nil
+}
+
+// parseSyncInterval accepts a Go duration ("30m", "1h", "90s"). Empty, "0", or
+// "off" disable the scheduler.
+func parseSyncInterval(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "0" || strings.EqualFold(s, "off") {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, err
+	}
+	if d < 0 {
+		return 0, errors.New("must be non-negative")
+	}
+	return d, nil
 }
 
 func (c *Config) CacheCapBytes() int64 {
