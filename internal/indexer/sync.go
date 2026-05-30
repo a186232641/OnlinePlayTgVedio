@@ -18,7 +18,13 @@ import (
 
 // SyncState is per-channel sync progress, kept in memory only.
 type SyncState struct {
-	Running    bool      `json:"running"`
+	Running bool `json:"running"`
+	// Phase is "fetching" while we walk TG history into memory, then "writing"
+	// while we upsert rows. During "fetching" Imported/Skipped stay 0 by design
+	// (they only move in the write phase), so Walked is what shows progress.
+	Phase      string    `json:"phase,omitempty"`
+	Walked     int       `json:"walked"` // messages scanned in the fetch phase
+	Total      int       `json:"total"`  // messages queued to write (known after fetch)
 	Imported   int       `json:"imported"`
 	Skipped    int       `json:"skipped"`
 	LastError  string    `json:"last_error,omitempty"`
@@ -85,6 +91,7 @@ func (i *Indexer) runSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
 	defer func() {
 		st.update(func(s *SyncState) {
 			s.Running = false
+			s.Phase = ""
 			s.FinishedAt = time.Now()
 		})
 		_ = i.db.MarkChannelIndexed(ctx, ch.ID, st.snapshot().Imported)
@@ -148,6 +155,8 @@ func (i *Indexer) runSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
 	// Phase 1: TG 的 messages.getHistory 只能从新往旧翻,先把"新于 maxSeen"
 	// 的消息全部收集到内存里。
 	const progressEvery = 1000
+	const uiEvery = 100 // surface walked count to the UI more often than we log
+	st.update(func(s *SyncState) { s.Phase = "fetching" })
 	var pending []*tg.Message
 	walked := 0
 	lastTickAt := time.Now()
@@ -164,6 +173,9 @@ func (i *Indexer) runSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
 			}
 			pending = append(pending, msg)
 			walked++
+			if walked%uiEvery == 0 {
+				st.update(func(s *SyncState) { s.Walked = walked })
+			}
 			if walked%progressEvery == 0 {
 				slog.Info("sync fetch",
 					"channel_id", ch.ID,
@@ -175,6 +187,7 @@ func (i *Indexer) runSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
 			}
 			return nil
 		})
+	st.update(func(s *SyncState) { s.Walked = walked })
 
 	if err != nil && !errors.Is(err, stopErr) && !errors.Is(err, context.Canceled) {
 		slog.Warn("sync fetch failed", "channel_id", ch.ID, "err", err)
@@ -187,6 +200,10 @@ func (i *Indexer) runSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
 	for i2, j := 0, len(pending)-1; i2 < j; i2, j = i2+1, j-1 {
 		pending[i2], pending[j] = pending[j], pending[i2]
 	}
+	st.update(func(s *SyncState) {
+		s.Phase = "writing"
+		s.Total = len(pending)
+	})
 	slog.Info("sync write start",
 		"channel_id", ch.ID,
 		"to_write", len(pending),

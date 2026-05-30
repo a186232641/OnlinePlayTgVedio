@@ -14,6 +14,9 @@ interface ImportResp {
 
 interface SyncState {
   running: boolean;
+  phase?: "fetching" | "writing" | "";
+  walked: number;
+  total: number;
   imported: number;
   skipped: number;
   last_error?: string;
@@ -160,7 +163,12 @@ function ChannelRow({
         {c.username && <div className="text-xs text-slate-500">@{c.username}</div>}
         {isSyncing && (
           <div className="text-xs text-amber-300 mt-0.5">
-            正在从 TG 同步: 已写入 {sync.data?.imported} · 跳过 {sync.data?.skipped}
+            {sync.data?.phase === "fetching" ? (
+              <>正在从 TG 抓取历史: 已遍历 {sync.data?.walked ?? 0} 条(首次同步需翻完整个频道,稍候才会开始写入)</>
+            ) : (
+              <>正在写入: {sync.data?.imported}
+                {sync.data?.total ? ` / ${sync.data.total}` : ""} · 跳过 {sync.data?.skipped}</>
+            )}
           </div>
         )}
         {!isSyncing && sync.data?.last_error && (
