@@ -9,8 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gotd/td/telegram/query"
-	"github.com/gotd/td/telegram/query/messages"
 	"github.com/gotd/td/tg"
 
 	"github.com/hanfeilong/onlineplaytgvideo/internal/db"
@@ -18,13 +16,12 @@ import (
 
 // SyncState is per-channel sync progress, kept in memory only.
 type SyncState struct {
-	Running bool `json:"running"`
-	// Phase is "fetching" while we walk TG history into memory, then "writing"
-	// while we upsert rows. During "fetching" Imported/Skipped stay 0 by design
-	// (they only move in the write phase), so Walked is what shows progress.
-	Phase      string    `json:"phase,omitempty"`
-	Walked     int       `json:"walked"` // messages scanned in the fetch phase
-	Total      int       `json:"total"`  // messages queued to write (known after fetch)
+	Running bool   `json:"running"`
+	Phase   string `json:"phase,omitempty"` // "syncing" while a run is active
+	// Walked is the number of messages scanned (video or not); Imported/Skipped
+	// move live as we write, because sync now streams to the DB batch by batch
+	// instead of buffering the whole history first.
+	Walked     int       `json:"walked"`
 	Imported   int       `json:"imported"`
 	Skipped    int       `json:"skipped"`
 	LastError  string    `json:"last_error,omitempty"`
@@ -49,9 +46,10 @@ func (e *syncEntry) update(fn func(*SyncState)) {
 	e.mu.Unlock()
 }
 
-// SyncStart kicks off (idempotently) a goroutine that pulls
-// messages.getHistory for the channel and upserts each video row. Incremental:
-// only fetches messages with id > MAX(tg_msg_id) already stored.
+// SyncStart kicks off (idempotently) a goroutine that pulls the channel's
+// history and upserts each video row. It is incremental (only messages newer
+// than what's stored) AND resumable (it backfills older history in batches,
+// so a crash mid-sync resumes from the stored MIN/MAX cursor next time).
 func (i *Indexer) SyncStart(parentCtx context.Context, channelID, userID int64) (SyncState, error) {
 	i.syncMu.Lock()
 	if st, ok := i.syncs[channelID]; ok && st.snapshot().Running {
@@ -94,6 +92,7 @@ func (i *Indexer) runSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
 			s.Phase = ""
 			s.FinishedAt = time.Now()
 		})
+		// Recount video_count from the actual rows (never the per-run delta).
 		_ = i.db.MarkChannelIndexed(ctx, ch.ID)
 	}()
 
@@ -103,156 +102,165 @@ func (i *Indexer) runSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
 		return
 	}
 
-	maxSeen, _ := i.db.MaxTGMsgID(ctx, ch.ID, ch.UserID)
+	maxSeen64, _ := i.db.MaxTGMsgID(ctx, ch.ID, ch.UserID)
+	maxSeen := int(maxSeen64)
 	slog.Info("sync start",
 		"channel_id", ch.ID, "title", ch.Title,
-		"tg_channel_id", ch.TGChannelID, "access_hash", ch.AccessHash,
-		"dialog_kind", ch.DialogKind, "max_seen", maxSeen,
+		"max_seen", maxSeen, "history_complete", ch.HistoryComplete,
 	)
 
-	// Probe: directly call MessagesGetHistory once and log the raw count.
-	// If this returns 0 messages, no point iterating — almost always means
-	// the access_hash is stale or we lost membership in the channel.
-	probe, perr := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
-		Peer:  peer,
-		Limit: 5,
-	})
+	// Probe: a single getHistory call. 0 messages almost always means the
+	// access_hash is stale or we lost membership — bail with a clear message
+	// instead of silently walking nothing.
+	probe, perr := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{Peer: peer, Limit: 1})
 	if perr != nil {
 		slog.Warn("sync probe failed", "channel_id", ch.ID, "err", perr)
 		st.update(func(s *SyncState) { s.LastError = "probe: " + perr.Error() })
 		return
 	}
-	probeMsgs := extractMessages(probe)
-	probeLatest := int64(0)
-	for _, mc := range probeMsgs {
-		if m, ok := mc.(*tg.Message); ok && int64(m.ID) > probeLatest {
-			probeLatest = int64(m.ID)
-		}
-	}
-	slog.Info("sync probe ok",
-		"channel_id", ch.ID,
-		"resp_type", fmt.Sprintf("%T", probe),
-		"messages", len(probeMsgs),
-		"latest_msg_id", probeLatest,
-	)
-	if len(probeMsgs) == 0 {
+	if len(extractMessages(probe)) == 0 {
 		st.update(func(s *SyncState) {
 			s.LastError = "TG 返回 0 条历史消息(可能 access_hash 已过期或失去访问权限,试着在 TG 账号管理页'重新发现')"
 		})
 		return
 	}
-	// Already up-to-date: TG's latest message is older than what we already
-	// have. Report this distinctly so the UI doesn't show a confusing "0/0".
-	if maxSeen > 0 && probeLatest > 0 && probeLatest <= maxSeen {
-		slog.Info("sync up-to-date",
-			"channel_id", ch.ID, "tg_latest", probeLatest, "max_seen", maxSeen)
-		st.update(func(s *SyncState) {
-			s.LastError = fmt.Sprintf("已是最新(本地已有到 msg_id=%d,TG 频道最新消息 id=%d)", maxSeen, probeLatest)
-		})
-		return
-	}
 
-	// Phase 1: TG 的 messages.getHistory 只能从新往旧翻,先把"新于 maxSeen"
-	// 的消息全部收集到内存里。
-	const progressEvery = 1000
-	const uiEvery = 100 // surface walked count to the UI more often than we log
-	st.update(func(s *SyncState) { s.Phase = "fetching" })
-	var pending []*tg.Message
-	walked := 0
-	lastTickAt := time.Now()
+	st.update(func(s *SyncState) { s.Phase = "syncing" })
 
-	stopErr := errors.New("done")
-	err = query.Messages(api).GetHistory(peer).BatchSize(100).
-		ForEach(ctx, func(_ context.Context, e messages.Elem) error {
-			msg, ok := e.Msg.(*tg.Message)
-			if !ok {
-				return nil
-			}
-			if maxSeen > 0 && int64(msg.ID) <= maxSeen {
-				return stopErr
-			}
-			pending = append(pending, msg)
-			walked++
-			if walked%uiEvery == 0 {
-				st.update(func(s *SyncState) { s.Walked = walked })
-			}
-			if walked%progressEvery == 0 {
-				slog.Info("sync fetch",
-					"channel_id", ch.ID,
-					"fetched", walked,
-					"current_msg_id", msg.ID,
-					"page_dur_ms", time.Since(lastTickAt).Milliseconds(),
-				)
-				lastTickAt = time.Now()
-			}
-			return nil
-		})
-	st.update(func(s *SyncState) { s.Walked = walked })
-
-	if err != nil && !errors.Is(err, stopErr) && !errors.Is(err, context.Canceled) {
-		slog.Warn("sync fetch failed", "channel_id", ch.ID, "err", err)
-		st.update(func(s *SyncState) { s.LastError = err.Error() })
-		return
-	}
-
-	// Phase 2: 反转,从最旧的消息开始写入,这样进度日志和数据库 created_at
-	// 顺序都和 Telegram 上的时间顺序一致。
-	for i2, j := 0, len(pending)-1; i2 < j; i2, j = i2+1, j-1 {
-		pending[i2], pending[j] = pending[j], pending[i2]
-	}
-	st.update(func(s *SyncState) {
-		s.Phase = "writing"
-		s.Total = len(pending)
-	})
-	slog.Info("sync write start",
-		"channel_id", ch.ID,
-		"to_write", len(pending),
-	)
-
-	written := 0
-	lastTickAt = time.Now()
-	for _, msg := range pending {
-		select {
-		case <-ctx.Done():
-			st.update(func(s *SyncState) { s.LastError = "canceled" })
+	// Phase A — incremental: pull messages newer than maxSeen (top of history).
+	// Skipped when the channel is empty; the backfill below covers that case.
+	if maxSeen > 0 {
+		if _, err := i.walkHistory(ctx, api, peer, ch, st, 0, maxSeen); err != nil {
+			i.reportSyncErr(ch, st, "incremental", err)
 			return
-		default:
-		}
-		v := videoFromTGMessage(ch, msg)
-		if v == nil {
-			st.update(func(s *SyncState) { s.Skipped++ })
-		} else {
-			if _, uerr := i.db.UpsertVideo(ctx, v); uerr != nil {
-				slog.Warn("sync upsert failed", "channel_id", ch.ID, "msg_id", msg.ID, "err", uerr)
-				st.update(func(s *SyncState) { s.LastError = uerr.Error() })
-				return
-			}
-			st.update(func(s *SyncState) { s.Imported++ })
-		}
-		written++
-		if written%progressEvery == 0 {
-			snap := st.snapshot()
-			slog.Info("sync write",
-				"channel_id", ch.ID,
-				"written", written, "of", len(pending),
-				"imported", snap.Imported, "skipped", snap.Skipped,
-				"current_msg_id", msg.ID,
-				"page_dur_ms", time.Since(lastTickAt).Milliseconds(),
-			)
-			lastTickAt = time.Now()
 		}
 	}
-	err = nil // both phases done
 
-	if err != nil && !errors.Is(err, stopErr) && !errors.Is(err, context.Canceled) {
-		slog.Warn("sync failed", "channel_id", ch.ID, "err", err)
-		st.update(func(s *SyncState) { s.LastError = err.Error() })
-		return
+	// Phase B — backfill: walk older history below our oldest message, in
+	// batches, until we hit the very bottom. Resumable: progress is written as
+	// we go, and MIN(tg_msg_id) is the cursor next time. Skipped once complete.
+	if !ch.HistoryComplete {
+		minSeen64, _ := i.db.MinTGMsgID(ctx, ch.ID, ch.UserID)
+		bottom, err := i.walkHistory(ctx, api, peer, ch, st, int(minSeen64), 0)
+		if err != nil {
+			i.reportSyncErr(ch, st, "backfill", err)
+			return
+		}
+		if bottom {
+			if err := i.db.SetHistoryComplete(ctx, ch.ID); err == nil {
+				ch.HistoryComplete = true
+			}
+		}
+	}
+
+	snap := st.snapshot()
+	if snap.Imported == 0 && snap.Skipped == 0 && ch.HistoryComplete {
+		st.update(func(s *SyncState) { s.LastError = "已是最新(没有新消息)" })
 	}
 	slog.Info("sync done",
 		"channel_id", ch.ID,
-		"imported", st.snapshot().Imported,
-		"skipped", st.snapshot().Skipped)
+		"imported", snap.Imported, "skipped", snap.Skipped, "walked", snap.Walked,
+		"history_complete", ch.HistoryComplete,
+	)
+}
+
+// reportSyncErr records a phase error. A timeout/cancel is benign — progress is
+// already persisted and the next run resumes from the stored cursor — so it
+// gets an informational message rather than a scary "failed".
+func (i *Indexer) reportSyncErr(ch *db.Channel, st *syncEntry, phase string, err error) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		slog.Info("sync interrupted (will resume next run)", "channel_id", ch.ID, "phase", phase)
+		st.update(func(s *SyncState) {
+			s.LastError = "已是最新? 本轮同步达时间上限,已保存进度,下次会从断点继续"
+		})
+		return
+	}
+	slog.Warn("sync phase failed", "channel_id", ch.ID, "phase", phase, "err", err)
+	st.update(func(s *SyncState) { s.LastError = err.Error() })
+}
+
+// walkHistory pages messages.getHistory newest→oldest, starting just below
+// startOffsetID (0 = from the newest message) and bounded below by minID (0 =
+// none). It writes each video to the DB as it goes, so a crash leaves partial
+// progress that the next run resumes from. Returns reachedBottom=true when
+// history is exhausted (an empty page), false when stopped at a bound / error.
+func (i *Indexer) walkHistory(
+	ctx context.Context, api *tg.Client, peer tg.InputPeerClass,
+	ch *db.Channel, st *syncEntry, startOffsetID, minID int,
+) (bool, error) {
+	const pageSize = 100
+	const logEvery = 1000
+	offsetID := startOffsetID
+	sinceLog := 0
+	lastTick := time.Now()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		default:
+		}
+
+		resp, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+			Peer:     peer,
+			OffsetID: offsetID,
+			MinID:    minID,
+			Limit:    pageSize,
+		})
+		if err != nil {
+			return false, err
+		}
+		msgs := extractMessages(resp)
+		if len(msgs) == 0 {
+			return true, nil // exhausted
+		}
+
+		batchMin := 0
+		for _, mc := range msgs {
+			if id := mc.GetID(); id > 0 && (batchMin == 0 || id < batchMin) {
+				batchMin = id
+			}
+			m, ok := mc.(*tg.Message)
+			if !ok {
+				continue
+			}
+			if err := i.writeMsg(ctx, ch, m, st); err != nil {
+				return false, err
+			}
+		}
+
+		st.update(func(s *SyncState) { s.Walked += len(msgs) })
+		if sinceLog += len(msgs); sinceLog >= logEvery {
+			snap := st.snapshot()
+			slog.Info("sync progress",
+				"channel_id", ch.ID, "walked", snap.Walked,
+				"imported", snap.Imported, "skipped", snap.Skipped,
+				"cursor_msg_id", batchMin, "page_dur_ms", time.Since(lastTick).Milliseconds(),
+			)
+			sinceLog = 0
+			lastTick = time.Now()
+		}
+
+		// Safety: if the cursor can't advance, stop rather than loop forever.
+		if batchMin == 0 || batchMin == offsetID {
+			return true, nil
+		}
+		offsetID = batchMin
+	}
+}
+
+// writeMsg upserts one message's video (if it has one), updating live counters.
+func (i *Indexer) writeMsg(ctx context.Context, ch *db.Channel, m *tg.Message, st *syncEntry) error {
+	v := videoFromTGMessage(ch, m)
+	if v == nil {
+		st.update(func(s *SyncState) { s.Skipped++ })
+		return nil
+	}
+	if _, err := i.db.UpsertVideo(ctx, v); err != nil {
+		return fmt.Errorf("upsert msg %d: %w", m.ID, err)
+	}
+	st.update(func(s *SyncState) { s.Imported++ })
+	return nil
 }
 
 // videoFromTGMessage maps a TG message to a db.Video, mirroring the JSON
@@ -268,12 +276,12 @@ func videoFromTGMessage(ch *db.Channel, msg *tg.Message) *db.Video {
 	}
 
 	var (
-		mediaType    string
-		fileName     string
-		w, h, dur    int
-		hasVideo     bool
-		isRound      bool
-		isAnimated   bool
+		mediaType  string
+		fileName   string
+		w, h, dur  int
+		hasVideo   bool
+		isRound    bool
+		isAnimated bool
 	)
 	for _, attr := range doc.Attributes {
 		switch a := attr.(type) {

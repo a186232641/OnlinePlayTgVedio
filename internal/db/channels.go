@@ -42,6 +42,7 @@ type Channel struct {
 	VideoCount      int
 	LastIndexedAt   *time.Time
 	GroupByStreamer bool
+	HistoryComplete bool
 }
 
 // All columns are qualified with the c.* alias because some queries
@@ -52,7 +53,7 @@ const channelCols = `
     COALESCE(c.username, ''), COALESCE(c.photo_path, ''),
     c.dialog_kind, c.parent_channel_id, c.topic_id,
     c.index_enabled, COALESCE(c.index_status, 'idle'), COALESCE(c.index_error, ''),
-    c.video_count, c.last_indexed_at, c.group_by_streamer
+    c.video_count, c.last_indexed_at, c.group_by_streamer, c.history_complete
 `
 
 func scanChannel(row pgx.Row) (*Channel, error) {
@@ -62,7 +63,7 @@ func scanChannel(row pgx.Row) (*Channel, error) {
 		&c.Username, &c.PhotoPath,
 		&c.DialogKind, &c.ParentChannelID, &c.TopicID,
 		&c.IndexEnabled, &c.IndexStatus, &c.IndexError,
-		&c.VideoCount, &c.LastIndexedAt, &c.GroupByStreamer,
+		&c.VideoCount, &c.LastIndexedAt, &c.GroupByStreamer, &c.HistoryComplete,
 	); err != nil {
 		return nil, err
 	}
@@ -211,6 +212,13 @@ func (d *DB) SetChannelGrouping(ctx context.Context, channelID, userID int64, en
 		return ErrNotFound
 	}
 	return nil
+}
+
+// SetHistoryComplete marks a channel as fully backfilled (walked to its oldest
+// message). Subsequent syncs then only pull new messages at the top.
+func (d *DB) SetHistoryComplete(ctx context.Context, channelID int64) error {
+	_, err := d.Exec(ctx, `UPDATE channels SET history_complete=TRUE WHERE id=$1`, channelID)
+	return err
 }
 
 // StreamerCount is one row of the per-channel streamer breakdown. Streamer is
