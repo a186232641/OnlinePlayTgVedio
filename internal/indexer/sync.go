@@ -259,6 +259,13 @@ func (i *Indexer) writeMsg(ctx context.Context, ch *db.Channel, m *tg.Message, s
 	if _, err := i.db.UpsertVideo(ctx, v); err != nil {
 		return fmt.Errorf("upsert msg %d: %w", m.ID, err)
 	}
+	// Album member: spread the group's caption onto its silent siblings so all
+	// of them are searchable, not just the one message that carried the text.
+	if v.GroupedID != 0 {
+		if err := i.db.PropagateGroupCaption(ctx, ch.UserID, ch.ID, v.GroupedID); err != nil {
+			return fmt.Errorf("propagate caption grp %d: %w", v.GroupedID, err)
+		}
+	}
 	st.update(func(s *SyncState) { s.Imported++ })
 	return nil
 }
@@ -338,6 +345,7 @@ func videoFromTGMessage(ch *db.Channel, msg *tg.Message) *db.Video {
 		Width:           w,
 		Height:          h,
 		Text:            msg.Message,
+		GroupedID:       msg.GroupedID, // 0 when not part of an album
 
 		// Sync gives us the locator straight from TG → first play won't refresh.
 		TGDocID:       doc.ID,

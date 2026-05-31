@@ -37,6 +37,11 @@ type Video struct {
 	Text              string
 	TextEntities      []byte // raw JSON; nil = none
 
+	// GroupedID is Telegram's album id (0 = not part of an album). Members of
+	// the same album share it; the caption lives on one member and is
+	// propagated to the rest so all are searchable.
+	GroupedID int64
+
 	// Streaming locator (lazy-filled on first play)
 	TGDocID       int64
 	AccessHash    int64
@@ -57,7 +62,8 @@ const videoCols = `
     COALESCE(v.media_type, ''), COALESCE(v.mime_type, ''),
     COALESCE(v.duration_seconds, 0), COALESCE(v.width, 0), COALESCE(v.height, 0),
     COALESCE(v.text, ''), v.text_entities,
-    COALESCE(v.tg_doc_id, 0), COALESCE(v.access_hash, 0), v.file_reference
+    COALESCE(v.tg_doc_id, 0), COALESCE(v.access_hash, 0), v.file_reference,
+    COALESCE(v.grouped_id, 0)
 `
 
 func scanVideo(row pgx.Row) (*Video, error) {
@@ -73,6 +79,7 @@ func scanVideo(row pgx.Row) (*Video, error) {
 		&v.DurationSeconds, &v.Width, &v.Height,
 		&v.Text, &v.TextEntities,
 		&v.TGDocID, &v.AccessHash, &v.FileReference,
+		&v.GroupedID,
 	); err != nil {
 		return nil, err
 	}
@@ -90,7 +97,7 @@ func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
             thumbnail, thumbnail_file_size,
             media_type, mime_type,
             duration_seconds, width, height,
-            text, text_entities
+            text, text_entities, grouped_id
         ) VALUES (
             $1,$2,
             $3,$4,$5,$6,
@@ -99,7 +106,7 @@ func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
             $12,$13,
             $14,$15,
             $16,$17,$18,
-            $19,$20
+            $19,$20,$21
         )
         ON CONFLICT (user_id, channel_id, tg_msg_id) DO UPDATE SET
             msg_type            = EXCLUDED.msg_type,
@@ -117,8 +124,11 @@ func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
             duration_seconds    = EXCLUDED.duration_seconds,
             width               = EXCLUDED.width,
             height              = EXCLUDED.height,
-            text                = EXCLUDED.text,
-            text_entities       = EXCLUDED.text_entities
+            -- Don't let a re-synced silent album sibling (empty text) clobber a
+            -- caption we propagated to it; keep the existing text in that case.
+            text                = COALESCE(NULLIF(EXCLUDED.text, ''), videos.text),
+            text_entities       = EXCLUDED.text_entities,
+            grouped_id          = EXCLUDED.grouped_id
         RETURNING id
     `,
 		v.UserID, v.ChannelID,
@@ -128,13 +138,47 @@ func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
 		nilIfEmpty(v.Thumbnail), v.ThumbnailFileSize,
 		nilIfEmpty(v.MediaType), nilIfEmpty(v.MimeType),
 		v.DurationSeconds, v.Width, v.Height,
-		nilIfEmpty(v.Text), v.TextEntities,
+		nilIfEmpty(v.Text), v.TextEntities, nilIfZero64(v.GroupedID),
 	)
 	var id int64
 	if err := row.Scan(&id); err != nil {
 		return 0, err
 	}
 	return id, nil
+}
+
+// nilIfZero64 maps 0 → SQL NULL so non-album rows leave grouped_id NULL (and
+// out of the partial index) instead of clustering under a bogus 0 group.
+func nilIfZero64(n int64) any {
+	if n == 0 {
+		return nil
+	}
+	return n
+}
+
+// PropagateGroupCaption copies the caption of an album (one member carries it)
+// onto every sibling in the same group whose text is still empty, so a text
+// search matches all of the album's videos, not just the captioned one.
+// Idempotent and order-independent: safe to call after writing any member.
+func (d *DB) PropagateGroupCaption(ctx context.Context, userID, channelID, groupedID int64) error {
+	if groupedID == 0 {
+		return nil
+	}
+	_, err := d.Exec(ctx, `
+        WITH cap AS (
+            SELECT text, text_entities
+            FROM videos
+            WHERE user_id=$1 AND channel_id=$2 AND grouped_id=$3
+              AND COALESCE(text, '') <> ''
+            LIMIT 1
+        )
+        UPDATE videos v
+        SET text = cap.text, text_entities = cap.text_entities
+        FROM cap
+        WHERE v.user_id=$1 AND v.channel_id=$2 AND v.grouped_id=$3
+          AND COALESCE(v.text, '') = ''
+    `, userID, channelID, groupedID)
+	return err
 }
 
 // UpdateVideoLocator persists the TG streaming locator after first refresh.
