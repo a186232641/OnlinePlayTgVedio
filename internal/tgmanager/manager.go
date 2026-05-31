@@ -12,12 +12,31 @@ import (
 	"github.com/gotd/contrib/middleware/floodwait"
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/telegram"
+	"github.com/gotd/td/telegram/dcs"
 	"github.com/gotd/td/tg"
 
 	"github.com/hanfeilong/onlineplaytgvideo/internal/config"
 	"github.com/hanfeilong/onlineplaytgvideo/internal/db"
 	"github.com/hanfeilong/onlineplaytgvideo/internal/tgsession"
 )
+
+// DCList returns the production DC list with any TG_DC_OVERRIDES applied. Each
+// override is prepended for its DC id so gotd dials the given (current) IP
+// before the built-in one, which goes stale when Telegram rotates addresses.
+// Same DC id ⇒ same auth key, so overriding only the address needs no re-login.
+func DCList(cfg *config.Config) dcs.List {
+	list := dcs.Prod()
+	if len(cfg.DCOverrides) == 0 {
+		return list
+	}
+	opts := make([]tg.DCOption, 0, len(cfg.DCOverrides)+len(list.Options))
+	for _, o := range cfg.DCOverrides {
+		opts = append(opts, tg.DCOption{ID: o.ID, IPAddress: o.IP, Port: o.Port})
+		slog.Info("tg dc override", "dc", o.ID, "addr", fmt.Sprintf("%s:%d", o.IP, o.Port))
+	}
+	list.Options = append(opts, list.Options...)
+	return list
+}
 
 // slowRPCThreshold: TG calls slower than this are logged so stalls are visible.
 const slowRPCThreshold = 3 * time.Second
@@ -130,6 +149,7 @@ func (m *Manager) Start(ctx context.Context, userID, sessionID int64) error {
 
 	client := telegram.NewClient(m.cfg.TgAPIID, m.cfg.TgAPIHash, telegram.Options{
 		SessionStorage: storage,
+		DCList:         DCList(m.cfg),
 		Middlewares: []telegram.Middleware{
 			waiter,
 			rpcLogger{sessionID: sessionID},

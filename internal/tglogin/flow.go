@@ -16,6 +16,7 @@ import (
 
 	"github.com/hanfeilong/onlineplaytgvideo/internal/config"
 	"github.com/hanfeilong/onlineplaytgvideo/internal/db"
+	"github.com/hanfeilong/onlineplaytgvideo/internal/tgmanager"
 	"github.com/hanfeilong/onlineplaytgvideo/internal/tgsession"
 )
 
@@ -141,6 +142,7 @@ func (m *Manager) Start(parentCtx context.Context, userID int64, phone string) (
 	storage := &tgsession.Storage{DB: m.db, SessionID: sessionID, MasterKey: m.cfg.MasterKey}
 	client := telegram.NewClient(m.cfg.TgAPIID, m.cfg.TgAPIHash, telegram.Options{
 		SessionStorage: storage,
+		DCList:         tgmanager.DCList(m.cfg),
 	})
 
 	// Drive the flow in a goroutine. We do NOT inherit parentCtx because the
