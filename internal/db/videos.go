@@ -258,6 +258,27 @@ type ListVideosOpts struct {
 	Streamer       string
 }
 
+// keysetCursor builds the WHERE condition for "rows after the boundary row
+// whose id = $p", matching the list's ORDER BY. The boundary row's sort key is
+// looked up by id server-side, so callers only need to pass offset_id (no extra
+// cursor params on the API/frontend).
+//
+// For the default date ordering (ORDER BY date DESC NULLS LAST, id DESC) a
+// plain `id < $p` cursor is WRONG: id is BIGSERIAL (insert order) while sync
+// writes incremental-at-top / backfill-at-bottom, so id order ≠ date order, and
+// the mismatch makes a page come up short and pagination stop early. The
+// composite (date, id) keyset below fixes that.
+func keysetCursor(orderBy, p string) string {
+	if orderBy == "duration" {
+		// Duration ordering isn't paginated by the frontend; keep it simple.
+		return "v.id < $" + p
+	}
+	cur := "(SELECT date FROM videos WHERE id = $" + p + ")"
+	return "CASE WHEN " + cur + " IS NULL " +
+		"THEN (v.date IS NULL AND v.id < $" + p + ") " +
+		"ELSE (v.date < " + cur + " OR (v.date = " + cur + " AND v.id < $" + p + ") OR v.date IS NULL) END"
+}
+
 func (d *DB) ListVideos(ctx context.Context, opt ListVideosOpts) ([]Video, error) {
 	if opt.Limit <= 0 || opt.Limit > 500 {
 		opt.Limit = 200
@@ -271,7 +292,7 @@ func (d *DB) ListVideos(ctx context.Context, opt ListVideosOpts) ([]Video, error
 	}
 	if opt.OffsetID > 0 {
 		args = append(args, opt.OffsetID)
-		where = append(where, "v.id < $"+itoa(len(args)))
+		where = append(where, keysetCursor(opt.OrderBy, itoa(len(args))))
 	}
 	if opt.StreamerFilter {
 		if opt.Streamer == "" {
@@ -368,7 +389,7 @@ func (d *DB) SearchVideos(ctx context.Context, opt SearchVideosOpts) ([]Video, e
 	}
 	if opt.OffsetID > 0 {
 		args = append(args, opt.OffsetID)
-		where = append(where, "v.id < $"+itoa(len(args)))
+		where = append(where, keysetCursor("", itoa(len(args))))
 	}
 	args = append(args, opt.Limit)
 	q := `SELECT ` + videoCols + ` FROM videos v WHERE ` + joinWhere(where) +
