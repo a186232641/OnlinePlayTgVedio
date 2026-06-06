@@ -275,6 +275,9 @@ func (h *ChannelsHandlers) ClearVideos(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, err)
 		return
 	}
+	// Re-arm the backfill: without this the channel keeps history_complete=TRUE
+	// and the next sync skips Phase B entirely, so the wiped history never returns.
+	_ = h.DB.ResetHistoryComplete(r.Context(), cid)
 	_ = h.DB.MarkChannelIndexed(r.Context(), cid)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": n})
 }

@@ -238,6 +238,14 @@ func (d *DB) SetHistoryComplete(ctx context.Context, channelID int64) error {
 	return err
 }
 
+// ResetHistoryComplete clears the backfill-done flag so the next sync re-walks
+// the full history. Used after clearing a channel's videos: otherwise sync would
+// see history_complete=TRUE and skip the backfill, leaving the wiped channel empty.
+func (d *DB) ResetHistoryComplete(ctx context.Context, channelID int64) error {
+	_, err := d.Exec(ctx, `UPDATE channels SET history_complete=FALSE WHERE id=$1`, channelID)
+	return err
+}
+
 // StreamerCount is one row of the per-channel streamer breakdown. Streamer is
 // "" for videos whose filename doesn't match the "{streamer}-DATE" pattern.
 type StreamerCount struct {
