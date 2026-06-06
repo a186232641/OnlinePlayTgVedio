@@ -55,6 +55,12 @@ func main() {
 	idx.StartScheduler(rootCtx, cfg.SyncInterval)
 
 	cacheMgr := cache.New(cfg, database, tgMgr)
+	// Inject the locator refresher so a cache download can recover from
+	// FILE_REFERENCE_EXPIRED. A function field (not an import) keeps cache from
+	// depending on the video package, which already depends on cache.
+	cacheMgr.RefreshLocator = func(ctx context.Context, v *db.Video) error {
+		return video.RefreshFileReference(ctx, database, tgMgr, v)
+	}
 	if err := cacheMgr.Start(rootCtx); err != nil {
 		slog.Error("cache start failed", "err", err)
 		os.Exit(1)

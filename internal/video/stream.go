@@ -118,6 +118,13 @@ func (s *StreamServer) serveFromTelegram(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	// Kick off a background multi-threaded full-file download into the cache.
+	// Idempotent: no-op if already cached or queued. Future plays/seeks then
+	// serve straight from disk instead of re-streaming from Telegram.
+	if s.Cache != nil {
+		s.Cache.EnsureCached(v.ID)
+	}
+
 	mime := v.MimeType
 	if mime == "" {
 		mime = "video/mp4"
@@ -164,16 +171,7 @@ func (s *StreamServer) serveFromTelegram(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Open a TeeWriter into a partial cache file if this is a favorite.
-	var sink io.Writer = w
-	if s.Cache != nil {
-		if tee, finish, ok := s.Cache.MaybeTee(r.Context(), v, start); ok {
-			defer finish()
-			sink = io.MultiWriter(w, tee)
-		}
-	}
-
-	if err := s.streamRange(r.Context(), cli.API, v, start, end, sink); err != nil {
+	if err := s.streamRange(r.Context(), cli.API, v, start, end, w); err != nil {
 		if !errors.Is(err, context.Canceled) {
 			slog.Warn("stream failed", "video_id", v.ID, "err", err)
 		}
