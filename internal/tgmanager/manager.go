@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
 	"github.com/gotd/contrib/bg"
 	"github.com/gotd/contrib/middleware/floodwait"
 	"github.com/gotd/td/bin"
@@ -17,8 +18,23 @@ import (
 
 	"github.com/hanfeilong/onlineplaytgvideo/internal/config"
 	"github.com/hanfeilong/onlineplaytgvideo/internal/db"
+	"github.com/hanfeilong/onlineplaytgvideo/internal/tgmw"
 	"github.com/hanfeilong/onlineplaytgvideo/internal/tgsession"
 )
+
+// recoveryMaxElapsed caps how long the recovery middleware keeps reconnecting
+// for a single RPC before giving up — long enough to ride out a DC migration /
+// brief network blip, short enough that a truly dead connection fails fast.
+const recoveryMaxElapsed = 90 * time.Second
+
+// recoveryBackoff builds a fresh exponential backoff for one RPC's recovery loop.
+func recoveryBackoff() backoff.BackOff {
+	b := backoff.NewExponentialBackOff()
+	b.Multiplier = 1.1
+	b.MaxInterval = 10 * time.Second
+	b.MaxElapsedTime = recoveryMaxElapsed
+	return b
+}
 
 // DCList returns the production DC list with any TG_DC_OVERRIDES applied. Each
 // override is prepended for its DC id so gotd dials the given (current) IP
@@ -147,10 +163,16 @@ func (m *Manager) Start(ctx context.Context, userID, sessionID int64) error {
 
 	waiter := floodwait.NewWaiter().WithMaxRetries(5)
 
+	// Middleware order is outermost→innermost. recovery reconnects on
+	// connection-level failures (IO timeouts from DC migration); retry absorbs
+	// transient server errors; the waiter backs off on FLOOD_WAIT; rpcLogger
+	// observes the raw per-attempt result.
 	client := telegram.NewClient(m.cfg.TgAPIID, m.cfg.TgAPIHash, telegram.Options{
 		SessionStorage: storage,
 		DCList:         DCList(m.cfg),
 		Middlewares: []telegram.Middleware{
+			tgmw.NewRecovery(ctx, recoveryBackoff),
+			tgmw.NewRetry(5),
 			waiter,
 			rpcLogger{sessionID: sessionID},
 		},
