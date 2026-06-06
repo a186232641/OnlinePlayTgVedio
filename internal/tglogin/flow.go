@@ -16,6 +16,7 @@ import (
 
 	"github.com/hanfeilong/onlineplaytgvideo/internal/config"
 	"github.com/hanfeilong/onlineplaytgvideo/internal/db"
+	"github.com/hanfeilong/onlineplaytgvideo/internal/tgmanager"
 	"github.com/hanfeilong/onlineplaytgvideo/internal/tgsession"
 )
 
@@ -36,7 +37,11 @@ type pending struct {
 	id        string
 	userID    int64
 	sessionID int64
-	phone     string
+	// effectiveSessionID is the session to actually bring online once the flow
+	// succeeds — it may differ from sessionID when this login was consolidated
+	// into a pre-existing session for the same TG account.
+	effectiveSessionID int64
+	phone              string
 
 	mu    sync.Mutex
 	stage Stage
@@ -137,6 +142,7 @@ func (m *Manager) Start(parentCtx context.Context, userID int64, phone string) (
 	storage := &tgsession.Storage{DB: m.db, SessionID: sessionID, MasterKey: m.cfg.MasterKey}
 	client := telegram.NewClient(m.cfg.TgAPIID, m.cfg.TgAPIHash, telegram.Options{
 		SessionStorage: storage,
+		DCList:         tgmanager.DCList(m.cfg),
 	})
 
 	// Drive the flow in a goroutine. We do NOT inherit parentCtx because the
@@ -155,9 +161,14 @@ func (m *Manager) Start(parentCtx context.Context, userID int64, phone string) (
 			if err != nil {
 				return fmt.Errorf("self: %w", err)
 			}
-			if err := m.db.MarkTGSessionActive(rctx, p.sessionID, p.phone, self.ID); err != nil {
+			// Fold this login into any existing session for the same TG account
+			// so a re-login reuses the original row (and keeps its channels)
+			// instead of stranding them under this throwaway row.
+			effectiveID, err := m.db.ActivateAndConsolidateTGSession(rctx, p.sessionID, userID, self.ID, p.phone)
+			if err != nil {
 				return fmt.Errorf("mark active: %w", err)
 			}
+			p.effectiveSessionID = effectiveID
 			return nil
 		})
 		if err != nil {
@@ -167,7 +178,11 @@ func (m *Manager) Start(parentCtx context.Context, userID int64, phone string) (
 		}
 		p.setStage(StageDone)
 		if m.onActivated != nil {
-			m.onActivated(userID, p.sessionID)
+			sid := p.effectiveSessionID
+			if sid == 0 {
+				sid = p.sessionID
+			}
+			m.onActivated(userID, sid)
 		}
 	}()
 

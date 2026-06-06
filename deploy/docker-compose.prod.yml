@@ -40,6 +40,8 @@ services:
       MASTER_KEY: ${MASTER_KEY}
       CACHE_DIR: /var/cache/tgvideo
       CACHE_CAP_GB: ${CACHE_CAP_GB:-50}
+      SYNC_INTERVAL: ${SYNC_INTERVAL:-30m}
+      TG_DC_OVERRIDES: ${TG_DC_OVERRIDES:-}
     depends_on:
       postgres:
         condition: service_healthy

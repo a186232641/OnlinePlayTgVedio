@@ -28,6 +28,18 @@ type Config struct {
 	// SyncInterval is how often the background scheduler re-runs an incremental
 	// TG sync for every already-synced channel. 0 disables auto-sync.
 	SyncInterval time.Duration
+
+	// DCOverrides override Telegram DC addresses (gotd's built-in IPs go stale
+	// when Telegram rotates them). Parsed from TG_DC_OVERRIDES, applied on top
+	// of dcs.Prod() so the given IP is tried first for that DC.
+	DCOverrides []DCOverride
+}
+
+// DCOverride pins a Telegram DC id to a specific IPv4/IPv6 address and port.
+type DCOverride struct {
+	ID   int
+	IP   string
+	Port int
 }
 
 func Load() (*Config, error) {
@@ -87,7 +99,77 @@ func Load() (*Config, error) {
 	}
 	c.SyncInterval = si
 
+	ov, err := parseDCOverrides(env("TG_DC_OVERRIDES", ""))
+	if err != nil {
+		return nil, fmt.Errorf("TG_DC_OVERRIDES: %w", err)
+	}
+	c.DCOverrides = ov
+
 	return c, nil
+}
+
+// parseDCOverrides parses "5=91.108.56.100,4=149.154.167.91:443" into overrides.
+// Each entry is "<dc-id>=<ip>[:<port>]"; the port defaults to 443.
+func parseDCOverrides(s string) ([]DCOverride, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil
+	}
+	var out []DCOverride
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		eq := strings.IndexByte(part, '=')
+		if eq < 0 {
+			return nil, fmt.Errorf("bad entry %q (want id=ip[:port])", part)
+		}
+		id, err := strconv.Atoi(strings.TrimSpace(part[:eq]))
+		if err != nil {
+			return nil, fmt.Errorf("bad dc id in %q: %w", part, err)
+		}
+		addr := strings.TrimSpace(part[eq+1:])
+		port := 443
+		// Split host:port only on the last colon so IPv6 literals survive; an
+		// IPv6 address must be bracketed if a port is appended ([::1]:443).
+		if h, p, ok := splitHostPort(addr); ok {
+			addr = h
+			if p != "" {
+				port, err = strconv.Atoi(p)
+				if err != nil {
+					return nil, fmt.Errorf("bad port in %q: %w", part, err)
+				}
+			}
+		}
+		if addr == "" {
+			return nil, fmt.Errorf("empty ip in %q", part)
+		}
+		out = append(out, DCOverride{ID: id, IP: addr, Port: port})
+	}
+	return out, nil
+}
+
+// splitHostPort splits "ip:port" / "[ipv6]:port" / "ip" without erroring on a
+// bare address. ok is false when there's no port component to split off.
+func splitHostPort(addr string) (host, port string, ok bool) {
+	if strings.HasPrefix(addr, "[") {
+		if end := strings.IndexByte(addr, ']'); end >= 0 {
+			host = addr[1:end]
+			rest := addr[end+1:]
+			if strings.HasPrefix(rest, ":") {
+				return host, rest[1:], true
+			}
+			return host, "", true
+		}
+		return addr, "", false
+	}
+	// Bare IPv6 (multiple colons) without brackets → treat whole thing as host.
+	if strings.Count(addr, ":") != 1 {
+		return addr, "", false
+	}
+	i := strings.IndexByte(addr, ':')
+	return addr[:i], addr[i+1:], true
 }
 
 // parseSyncInterval accepts a Go duration ("30m", "1h", "90s"). Empty, "0", or
