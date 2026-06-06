@@ -255,7 +255,9 @@ func (m *Manager) downloadDoc(ctx context.Context, v *db.Video) error {
 	tmp := filepath.Join(m.tmpDir(), fmt.Sprintf("%d.dl", v.TGDocID))
 	final := m.videoPath(v.TGDocID)
 
-	size, err := m.downloadParallel(ctx, cli.API, v, tmp)
+	// Download straight from the document's DC via the pool (avoids per-request
+	// DC migration / IO timeouts under parallel load).
+	size, err := m.downloadParallel(ctx, cli.APIForDC(v.DCID), v, tmp)
 	if err != nil {
 		_ = os.Remove(tmp)
 		return err
@@ -322,13 +324,13 @@ func (m *Manager) lookupVideoForDownload(ctx context.Context, videoID int64) (*d
 	row := m.db.QueryRow(ctx, `
         SELECT id, user_id, channel_id, tg_msg_id,
                COALESCE(tg_doc_id, 0), COALESCE(access_hash, 0), file_reference,
-               COALESCE(mime_type, ''), COALESCE(file_size, 0)
+               COALESCE(mime_type, ''), COALESCE(file_size, 0), COALESCE(dc_id, 0)
         FROM videos WHERE id=$1
     `, videoID)
 	v := &db.Video{}
 	if err := row.Scan(&v.ID, &v.UserID, &v.ChannelID, &v.TGMsgID,
 		&v.TGDocID, &v.AccessHash, &v.FileReference,
-		&v.MimeType, &v.FileSize); err != nil {
+		&v.MimeType, &v.FileSize, &v.DCID); err != nil {
 		return nil, err
 	}
 	return v, nil

@@ -125,6 +125,10 @@ func (s *StreamServer) serveFromTelegram(w http.ResponseWriter, r *http.Request,
 		s.Cache.EnsureCached(v.ID)
 	}
 
+	// Route file reads straight to the document's DC via the pool — avoids the
+	// per-request DC migration that causes IO timeouts on the default client.
+	api := cli.APIForDC(v.DCID)
+
 	mime := v.MimeType
 	if mime == "" {
 		mime = "video/mp4"
@@ -140,7 +144,7 @@ func (s *StreamServer) serveFromTelegram(w http.ResponseWriter, r *http.Request,
 		if r.Method == http.MethodHead {
 			return
 		}
-		if err := s.streamRange(r.Context(), cli.API, v, 0, maxStream, w); err != nil {
+		if err := s.streamRange(r.Context(), api, v, 0, maxStream, w); err != nil {
 			if !errors.Is(err, context.Canceled) {
 				slog.Warn("stream(unknown size) failed", "video_id", v.ID, "err", err)
 			}
@@ -171,7 +175,7 @@ func (s *StreamServer) serveFromTelegram(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	if err := s.streamRange(r.Context(), cli.API, v, start, end, w); err != nil {
+	if err := s.streamRange(r.Context(), api, v, start, end, w); err != nil {
 		if !errors.Is(err, context.Canceled) {
 			slog.Warn("stream failed", "video_id", v.ID, "err", err)
 		}

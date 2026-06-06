@@ -46,6 +46,10 @@ type Video struct {
 	TGDocID       int64
 	AccessHash    int64
 	FileReference []byte
+
+	// DCID is the data center the document lives on (0 = unknown). Used to route
+	// file transfers through the right per-DC connection pool.
+	DCID int
 }
 
 // All columns prefixed with v. so SELECT works even when the FROM clause
@@ -63,7 +67,7 @@ const videoCols = `
     COALESCE(v.duration_seconds, 0), COALESCE(v.width, 0), COALESCE(v.height, 0),
     COALESCE(v.text, ''), v.text_entities,
     COALESCE(v.tg_doc_id, 0), COALESCE(v.access_hash, 0), v.file_reference,
-    COALESCE(v.grouped_id, 0)
+    COALESCE(v.grouped_id, 0), COALESCE(v.dc_id, 0)
 `
 
 func scanVideo(row pgx.Row) (*Video, error) {
@@ -79,7 +83,7 @@ func scanVideo(row pgx.Row) (*Video, error) {
 		&v.DurationSeconds, &v.Width, &v.Height,
 		&v.Text, &v.TextEntities,
 		&v.TGDocID, &v.AccessHash, &v.FileReference,
-		&v.GroupedID,
+		&v.GroupedID, &v.DCID,
 	); err != nil {
 		return nil, err
 	}
@@ -97,7 +101,7 @@ func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
             thumbnail, thumbnail_file_size,
             media_type, mime_type,
             duration_seconds, width, height,
-            text, text_entities, grouped_id
+            text, text_entities, grouped_id, dc_id
         ) VALUES (
             $1,$2,
             $3,$4,$5,$6,
@@ -106,7 +110,7 @@ func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
             $12,$13,
             $14,$15,
             $16,$17,$18,
-            $19,$20,$21
+            $19,$20,$21,$22
         )
         ON CONFLICT (user_id, channel_id, tg_msg_id) DO UPDATE SET
             msg_type            = EXCLUDED.msg_type,
@@ -128,7 +132,9 @@ func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
             -- caption we propagated to it; keep the existing text in that case.
             text                = COALESCE(NULLIF(EXCLUDED.text, ''), videos.text),
             text_entities       = EXCLUDED.text_entities,
-            grouped_id          = EXCLUDED.grouped_id
+            grouped_id          = EXCLUDED.grouped_id,
+            -- Keep a known DC if a later re-import (e.g. JSON) carries 0.
+            dc_id               = CASE WHEN EXCLUDED.dc_id > 0 THEN EXCLUDED.dc_id ELSE videos.dc_id END
         RETURNING id
     `,
 		v.UserID, v.ChannelID,
@@ -138,7 +144,7 @@ func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
 		nilIfEmpty(v.Thumbnail), v.ThumbnailFileSize,
 		nilIfEmpty(v.MediaType), nilIfEmpty(v.MimeType),
 		v.DurationSeconds, v.Width, v.Height,
-		nilIfEmpty(v.Text), v.TextEntities, nilIfZero64(v.GroupedID),
+		nilIfEmpty(v.Text), v.TextEntities, nilIfZero64(v.GroupedID), v.DCID,
 	)
 	var id int64
 	if err := row.Scan(&id); err != nil {
@@ -182,17 +188,18 @@ func (d *DB) PropagateGroupCaption(ctx context.Context, userID, channelID, group
 }
 
 // UpdateVideoLocator persists the TG streaming locator after first refresh.
-// FileSize is overwritten only when newSize > 0; same for mime_type.
-func (d *DB) UpdateVideoLocator(ctx context.Context, id int64, tgDocID, accessHash int64, fr []byte, newSize int64, newMime string) error {
+// FileSize is overwritten only when newSize > 0; same for mime_type and dc_id.
+func (d *DB) UpdateVideoLocator(ctx context.Context, id int64, tgDocID, accessHash int64, fr []byte, newSize int64, newMime string, dcID int) error {
 	_, err := d.Exec(ctx, `
         UPDATE videos SET
             tg_doc_id      = $2,
             access_hash    = $3,
             file_reference = $4,
             file_size      = CASE WHEN $5 > 0 THEN $5 ELSE file_size END,
-            mime_type      = COALESCE(NULLIF($6, ''), mime_type)
+            mime_type      = COALESCE(NULLIF($6, ''), mime_type),
+            dc_id          = CASE WHEN $7 > 0 THEN $7 ELSE dc_id END
         WHERE id=$1
-    `, id, tgDocID, accessHash, fr, newSize, newMime)
+    `, id, tgDocID, accessHash, fr, newSize, newMime, dcID)
 	return err
 }
 

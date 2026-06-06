@@ -351,6 +351,7 @@ func videoFromTGMessage(ch *db.Channel, msg *tg.Message) *db.Video {
 		TGDocID:       doc.ID,
 		AccessHash:    doc.AccessHash,
 		FileReference: doc.FileReference,
+		DCID:          doc.DCID,
 	}
 }
 
