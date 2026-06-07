@@ -3,6 +3,7 @@ package handlers
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -21,15 +22,24 @@ type favReq struct {
 	VideoID int64 `json:"video_id"`
 }
 
+// List returns the user's favorites. It also accepts the same file_name /
+// date_from / date_to / order filters as /videos/search (any subset, all
+// optional) so the favorites page can search and sort within favorites — these
+// are threaded through SearchVideos with FavOnly so they share one query path.
 func (h *FavoritesHandlers) List(w http.ResponseWriter, r *http.Request) {
 	uid, _ := web.UserIDFromContext(r.Context())
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	offsetID, _ := strconv.ParseInt(r.URL.Query().Get("offset_id"), 10, 64)
-	vids, err := h.DB.ListVideos(r.Context(), db.ListVideosOpts{
+	qv := r.URL.Query()
+	limit, _ := strconv.Atoi(qv.Get("limit"))
+	offsetID, _ := strconv.ParseInt(qv.Get("offset_id"), 10, 64)
+	vids, err := h.DB.SearchVideos(r.Context(), db.SearchVideosOpts{
 		UserID:   uid,
+		FavOnly:  true,
+		FileName: strings.TrimSpace(qv.Get("file_name")),
+		DateFrom: parseDateOnly(qv.Get("date_from"), false),
+		DateTo:   parseDateOnly(qv.Get("date_to"), true),
+		OrderBy:  qv.Get("order"),
 		Limit:    limit,
 		OffsetID: offsetID,
-		FavOnly:  true,
 	})
 	if err != nil {
 		httpx.WriteError(w, err)

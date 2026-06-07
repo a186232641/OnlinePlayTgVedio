@@ -265,6 +265,41 @@ type ListVideosOpts struct {
 	Streamer       string
 }
 
+// orderColumn maps an order key to the sort column and direction. An empty
+// column means "no composite keyset" (duration / unknown) — fall back to a
+// plain id cursor. Any unrecognized key is treated as the default date DESC.
+func orderColumn(orderBy string) (col string, asc bool) {
+	switch orderBy {
+	case "date_asc":
+		return "date", true
+	case "name_asc":
+		return "file_name", true
+	case "name_desc":
+		return "file_name", false
+	case "duration":
+		return "", false
+	default: // "" / "date_desc"
+		return "date", false
+	}
+}
+
+// orderClause returns the ORDER BY for a given order key. id is always the
+// tie-breaker in the same direction so the (col, id) tuple is a total order,
+// which the keyset cursor relies on. NULLS LAST keeps captionless/undated rows
+// at the tail in both directions.
+func orderClause(orderBy string) string {
+	col, asc := orderColumn(orderBy)
+	if col == "" {
+		// duration (or unknown non-date/name) — keep the legacy clause.
+		return " ORDER BY v.duration_seconds DESC, v.id DESC"
+	}
+	dir := "DESC"
+	if asc {
+		dir = "ASC"
+	}
+	return " ORDER BY v." + col + " " + dir + " NULLS LAST, v.id " + dir
+}
+
 // keysetCursor builds the WHERE condition for "rows after the boundary row
 // whose id = $p", matching the list's ORDER BY. The boundary row's sort key is
 // looked up by id server-side, so callers only need to pass offset_id (no extra
@@ -274,16 +309,25 @@ type ListVideosOpts struct {
 // plain `id < $p` cursor is WRONG: id is BIGSERIAL (insert order) while sync
 // writes incremental-at-top / backfill-at-bottom, so id order ≠ date order, and
 // the mismatch makes a page come up short and pagination stop early. The
-// composite (date, id) keyset below fixes that.
+// composite (col, id) keyset below fixes that for date and file_name ordering;
+// duration keeps the simple id cursor (not frontend-paginated).
 func keysetCursor(orderBy, p string) string {
-	if orderBy == "duration" {
-		// Duration ordering isn't paginated by the frontend; keep it simple.
+	col, asc := orderColumn(orderBy)
+	if col == "" {
 		return "v.id < $" + p
 	}
-	cur := "(SELECT date FROM videos WHERE id = $" + p + ")"
+	cmp := "<"
+	if asc {
+		cmp = ">"
+	}
+	c := "v." + col
+	cur := "(SELECT " + col + " FROM videos WHERE id = $" + p + ")"
+	// Boundary in the NULL tail ⇒ only later NULLs (by id, same direction).
+	// Otherwise: strictly past the boundary value, the tie broken by id, plus
+	// the whole NULL tail (which sorts after any non-NULL value).
 	return "CASE WHEN " + cur + " IS NULL " +
-		"THEN (v.date IS NULL AND v.id < $" + p + ") " +
-		"ELSE (v.date < " + cur + " OR (v.date = " + cur + " AND v.id < $" + p + ") OR v.date IS NULL) END"
+		"THEN (" + c + " IS NULL AND v.id " + cmp + " $" + p + ") " +
+		"ELSE (" + c + " " + cmp + " " + cur + " OR (" + c + " = " + cur + " AND v.id " + cmp + " $" + p + ") OR " + c + " IS NULL) END"
 }
 
 func (d *DB) ListVideos(ctx context.Context, opt ListVideosOpts) ([]Video, error) {
@@ -313,11 +357,7 @@ func (d *DB) ListVideos(ctx context.Context, opt ListVideosOpts) ([]Video, error
 		q += ` JOIN favorites f ON f.video_id=v.id AND f.user_id=v.user_id `
 	}
 	q += ` WHERE ` + joinWhere(where)
-	if opt.OrderBy == "duration" {
-		q += ` ORDER BY v.duration_seconds DESC, v.id DESC`
-	} else {
-		q += ` ORDER BY v.date DESC NULLS LAST, v.id DESC`
-	}
+	q += orderClause(opt.OrderBy)
 	args = append(args, opt.Limit)
 	q += ` LIMIT $` + itoa(len(args))
 	rows, err := d.Query(ctx, q, args...)
@@ -361,6 +401,8 @@ type SearchVideosOpts struct {
 	ChannelID int64
 	Limit     int
 	OffsetID  int64
+	OrderBy   string
+	FavOnly   bool // restrict to the user's favorites (JOIN favorites)
 }
 
 func (d *DB) SearchVideos(ctx context.Context, opt SearchVideosOpts) ([]Video, error) {
@@ -396,11 +438,15 @@ func (d *DB) SearchVideos(ctx context.Context, opt SearchVideosOpts) ([]Video, e
 	}
 	if opt.OffsetID > 0 {
 		args = append(args, opt.OffsetID)
-		where = append(where, keysetCursor("", itoa(len(args))))
+		where = append(where, keysetCursor(opt.OrderBy, itoa(len(args))))
 	}
 	args = append(args, opt.Limit)
-	q := `SELECT ` + videoCols + ` FROM videos v WHERE ` + joinWhere(where) +
-		` ORDER BY v.date DESC NULLS LAST, v.id DESC LIMIT $` + itoa(len(args))
+	from := `FROM videos v `
+	if opt.FavOnly {
+		from += `JOIN favorites f ON f.video_id=v.id AND f.user_id=v.user_id `
+	}
+	q := `SELECT ` + videoCols + ` ` + from + `WHERE ` + joinWhere(where) +
+		orderClause(opt.OrderBy) + ` LIMIT $` + itoa(len(args))
 	rows, err := d.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
