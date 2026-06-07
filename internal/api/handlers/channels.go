@@ -163,7 +163,10 @@ func (h *ChannelsHandlers) List(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]channelDTO, 0, len(chs))
 	for _, c := range chs {
-		if c.DialogKind == db.DialogKindForum || c.DialogKind == db.DialogKindTopic {
+		// Only broadcast channels and supergroups are browsable. Basic groups,
+		// private chats/bots, and raw forum/topic rows are hidden — even if older
+		// rows of those kinds still linger from before discovery was narrowed.
+		if c.DialogKind != db.DialogKindChannel && c.DialogKind != db.DialogKindMegagroup {
 			continue
 		}
 		out = append(out, channelToDTO(c))
