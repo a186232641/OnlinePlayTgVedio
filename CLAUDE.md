@@ -44,6 +44,17 @@ account is a `tg_session` row, and `tgmanager.Manager` owns one persistent `*tel
 auto-backs-off on FLOOD_WAIT. `RestoreActive` rebuilds all clients on startup. Most code paths key
 off `tg_session_id` — a channel knows which session can fetch it via `Channel.TGSessionID`.
 
+**Per-DC connection pool + resilience middlewares.** Telegram files live on a specific data center;
+issuing file reads through a client connected to a different DC forces repeated DC migration and IO
+timeouts. `internal/dcpool` keeps a lazily-created connection pool per DC on top of the one
+authenticated client, and callers fetch via `cli.APIForDC(v.DCID)` so reads go straight to the
+file's DC (`videos.dc_id`, populated on locator resolve in `refresh.go`). Both the high-level client
+and every per-DC pool invoker are wrapped with `internal/tgmw` middlewares: `NewRecovery`
+(exponential-backoff reconnect on any non-business, non-cancel error) and `NewRetry` (bounded retry
+on transient server errors like `Timedout`/`RPC_CALL_FAIL`, mirroring tdl's list). `TG_DC_OVERRIDES`
+(env) pins DC IPs when Telegram rotates them — pool invokers don't inherit the high-level client's
+middleware chain, so middlewares are passed into `dcpool.NewPool` explicitly.
+
 **Session secrecy.** `tgsession.Storage` implements gotd's `session.Storage` but encrypts the
 session blob with AES-256-GCM (`internal/tgsession/crypto.go`) before writing to Postgres. The key
 is `MASTER_KEY` from env. Losing `MASTER_KEY` bricks every stored session → all users must re-bind.
@@ -69,16 +80,23 @@ phone/code/2FA-password into the in-flight gotd auth goroutine. SignUp is not su
   `SyncStart`. `MarkChannelIndexed` recomputes `video_count` via `COUNT(*)` — never
   a per-run delta, or incremental syncs would clobber the total.
 
-**Streaming** (`internal/video/stream.go`): browser `Range: bytes=…` → backend aligns to 4KB
-boundaries and loops `tg.Client.UploadGetFile(Precise=true)` in 1MiB chunks, trimming the
-alignment prefix on the first chunk and overflow on the last. On `FILE_REFERENCE_EXPIRED` it
-lazily re-fetches the locator via `channels.getMessages` (`refresh.go`), updates the DB, and
-retries once. CDN-redirected files are **not** supported (returns 500).
+**Streaming** (`internal/video/stream.go`): on each request, if a complete cached file exists for
+`tg_doc_id` (`Cache.CompletePathFor`) it serves straight off disk via `http.ServeFile` and returns.
+Otherwise `serveFromTelegram`: browser `Range: bytes=…` → backend aligns to 4KB boundaries and loops
+`tg.Client.UploadGetFile(Precise=true)` (bounded parallel prefetch) in 1MiB chunks via the file's-DC
+client (`cli.APIForDC`), trimming the alignment prefix on the first chunk and overflow on the last.
+JSON-imported rows (`TGDocID=0`) resolve their locator on first play; on `FILE_REFERENCE_EXPIRED` it
+lazily re-fetches via `channels.getMessages` (`refresh.go`), updates the DB, and retries once.
+CDN-redirected files are **not** supported (returns 500). Each Telegram-served play also fires
+`Cache.EnsureCached` so the next play/seek hits the disk fast path.
 
-**Caching** (`internal/cache/cache.go`): favoriting enqueues a background worker that downloads the
-whole file to `<CACHE_DIR>/videos/<doc_id>.bin` and pins it; an LRU GC runs every ~5 min to evict
-unpinned entries over `CACHE_CAP_GB`. Dedup is by global `tg_doc_id`, so the same video favorited
-by multiple users costs one copy on disk. `cache_entries` table tracks state.
+**Caching** (`internal/cache/cache.go`): **edge cache** — *every played* video is enqueued for a
+background full-file download (tdl-style multi-threaded; thread count scales with file size,
+`bestThreads`) to `<CACHE_DIR>/videos/<doc_id>.bin`, unpinned so the LRU can evict it. **Favoriting**
+enqueues the same download but **pinned** so GC never drops it. An LRU GC runs every ~5 min to evict
+unpinned entries over `CACHE_CAP_GB` (env, default **50**). Downloads dedup by `tg_doc_id` (one copy
+on disk no matter how many users), write to a `tmp/` file then atomically promote. `cache_entries`
+table tracks state; `cleanPartials` clears stale temp files on startup.
 
 **DB layer** (`internal/db/`): thin wrapper over `pgxpool`; one file per table-repo. Migrations are
 embedded SQL (`migrations/*.sql`, `//go:embed`) applied in lexical order at startup, tracked in a
