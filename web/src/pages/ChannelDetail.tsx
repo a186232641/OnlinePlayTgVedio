@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 
 import { api, Channel, Streamer, Video } from "../api/client";
 import { VideoGrid } from "../components/VideoGrid";
+import { SortSelect, SortValue, DEFAULT_SORT } from "../components/SortSelect";
 
 interface Page { videos: Video[]; total?: number }
 interface ChannelResp { channel: Channel }
@@ -77,14 +78,16 @@ export function ChannelDetail() {
 function UngroupedView({ id }: { id: string }) {
   const [draft, setDraft] = useState("");
   const [query, setQuery] = useState("");
+  const [order, setOrder] = useState<SortValue>(DEFAULT_SORT);
 
   const q = useInfiniteQuery<Page>({
-    queryKey: ["channel", id, "videos", query],
+    queryKey: ["channel", id, "videos", query, order],
     initialPageParam: 0,
     queryFn: async ({ pageParam }) => {
       const cursor = pageParam as number;
       const qs = new URLSearchParams({ limit: String(PAGE_SIZE) });
       if (cursor > 0) qs.set("offset_id", String(cursor));
+      if (order !== DEFAULT_SORT) qs.set("order", order);
       if (query) {
         qs.set("q", query);
         qs.set("channel_id", String(id));
@@ -119,6 +122,7 @@ function UngroupedView({ id }: { id: string }) {
             className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 rounded text-sm"
           >清空</button>
         )}
+        <SortSelect value={order} onChange={setOrder} className="px-3 py-1.5 bg-slate-800 rounded text-sm" />
       </form>
 
       <div className="px-6 text-xs text-slate-500">
@@ -140,6 +144,7 @@ function UngroupedView({ id }: { id: string }) {
             const params = new URLSearchParams();
             params.set("ch", String(id));
             if (query) params.set("q", query);
+            if (order !== DEFAULT_SORT) params.set("order", order);
             return `/videos/${v.id}?${params}`;
           }}
         />
@@ -196,13 +201,15 @@ function StreamerList({ id, onPick }: { id: string; onPick: (s: string) => void 
 
 // StreamerVideos is the drill-down: one streamer's videos, paginated.
 function StreamerVideos({ id, streamer, onBack }: { id: string; streamer: string; onBack: () => void }) {
+  const [order, setOrder] = useState<SortValue>(DEFAULT_SORT);
   const q = useInfiniteQuery<Page>({
-    queryKey: ["channel", id, "streamer-videos", streamer],
+    queryKey: ["channel", id, "streamer-videos", streamer, order],
     initialPageParam: 0,
     queryFn: async ({ pageParam }) => {
       const cursor = pageParam as number;
       const qs = new URLSearchParams({ limit: String(PAGE_SIZE), streamer });
       if (cursor > 0) qs.set("offset_id", String(cursor));
+      if (order !== DEFAULT_SORT) qs.set("order", order);
       return api.get<Page>(`/api/channels/${id}/videos?${qs}`);
     },
     getNextPageParam: (last) =>
@@ -216,6 +223,7 @@ function StreamerVideos({ id, streamer, onBack }: { id: string; streamer: string
         <button onClick={onBack} className="text-sm text-emerald-400 hover:text-emerald-300">← 返回主播列表</button>
         <span className="text-sm font-medium truncate">{streamer || "其它 (未匹配)"}</span>
         <span className="text-xs text-slate-500">已加载 {all.length}</span>
+        <SortSelect value={order} onChange={setOrder} className="ml-auto px-3 py-1.5 bg-slate-800 rounded text-sm" />
       </div>
 
       {q.isLoading ? (
@@ -227,6 +235,7 @@ function StreamerVideos({ id, streamer, onBack }: { id: string; streamer: string
             const params = new URLSearchParams();
             params.set("ch", String(id));
             params.set("streamer", streamer);
+            if (order !== DEFAULT_SORT) params.set("order", order);
             return `/videos/${v.id}?${params}`;
           }}
         />
