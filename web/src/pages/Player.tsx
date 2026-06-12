@@ -30,9 +30,18 @@ function playlistRequest(p: URLSearchParams): string | null {
   const dateFrom = p.get("date_from");
   const dateTo = p.get("date_to");
   const fav = p.get("fav");
+  // `order` is forwarded to every list endpoint so the playlist ordering
+  // matches the page the user came from (and prev/next walk in that order).
+  const order = p.get("order");
 
-  const limitQS = `limit=${PLAYLIST_PAGE_SIZE}`;
-  if (fav) return `/api/favorites/?${limitQS}`;
+  if (fav) {
+    const qs = new URLSearchParams({ limit: String(PLAYLIST_PAGE_SIZE) });
+    if (fileName) qs.set("file_name", fileName);
+    if (dateFrom) qs.set("date_from", dateFrom);
+    if (dateTo) qs.set("date_to", dateTo);
+    if (order) qs.set("order", order);
+    return `/api/favorites/?${qs}`;
+  }
 
   const hasSearch = !!(q || text || fileName || dateFrom || dateTo);
   if (hasSearch) {
@@ -43,6 +52,7 @@ function playlistRequest(p: URLSearchParams): string | null {
     if (dateFrom) qs.set("date_from", dateFrom);
     if (dateTo) qs.set("date_to", dateTo);
     if (ch) qs.set("channel_id", ch);
+    if (order) qs.set("order", order);
     return `/api/videos/search?${qs}`;
   }
   if (ch) {
@@ -50,6 +60,7 @@ function playlistRequest(p: URLSearchParams): string | null {
     // Grouped channel view links carry ?streamer=... (possibly empty = the
     // "其它" bucket) — keep the playlist scoped to that streamer.
     if (p.has("streamer")) qs.set("streamer", p.get("streamer") ?? "");
+    if (order) qs.set("order", order);
     return `/api/channels/${ch}/videos?${qs}`;
   }
   return null;
