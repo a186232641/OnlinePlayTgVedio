@@ -51,6 +51,16 @@ func (d *DB) MarkCacheCompleted(ctx context.Context, docID int64, bytes int64) e
 	return err
 }
 
+// MarkCacheIncomplete resets an entry to not-completed (e.g. when the on-disk
+// file failed an integrity check), so the next play re-downloads it. The pinned
+// flag is preserved, so favorites stay pinned across the re-download.
+func (d *DB) MarkCacheIncomplete(ctx context.Context, docID int64) error {
+	_, err := d.Exec(ctx, `
+        UPDATE cache_entries SET completed=false, bytes=0 WHERE tg_doc_id=$1
+    `, docID)
+	return err
+}
+
 func (d *DB) TouchCache(ctx context.Context, docID int64) error {
 	_, err := d.Exec(ctx, `UPDATE cache_entries SET last_accessed_at=NOW() WHERE tg_doc_id=$1`, docID)
 	return err

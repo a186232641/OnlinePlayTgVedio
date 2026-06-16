@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -83,12 +84,28 @@ func (s *StreamServer) Handler() http.HandlerFunc {
 			"range", r.Header.Get("Range"),
 		)
 
-		// Fast path: cached file present and complete.
+		// Fast path: cached file present, complete, and the right size.
 		if v.TGDocID != 0 {
 			if path, ok := s.Cache.CompletePathFor(r.Context(), v.TGDocID); ok {
-				s.Cache.Touch(r.Context(), v.TGDocID)
-				http.ServeFile(w, r, path)
-				return
+				if fi, statErr := os.Stat(path); statErr == nil && (v.FileSize <= 0 || fi.Size() == v.FileSize) {
+					s.Cache.Touch(r.Context(), v.TGDocID)
+					// Mirror the from-Telegram Content-Type; ServeFile would
+					// otherwise sniff the extensionless .bin and can hand iOS
+					// Safari the wrong type for non-MP4 containers.
+					mime := v.MimeType
+					if mime == "" {
+						mime = "video/mp4"
+					}
+					w.Header().Set("Content-Type", mime)
+					http.ServeFile(w, r, path)
+					return
+				}
+				// Cached file is missing or the wrong size (a truncated earlier
+				// download): it streams fine from Telegram but fails to decode in
+				// the browser. Drop it and fall through to streaming from TG.
+				slog.Warn("cached file failed integrity check, re-streaming",
+					"video_id", v.ID, "tg_doc_id", v.TGDocID, "want_size", v.FileSize)
+				s.Cache.InvalidateCorrupt(r.Context(), v.TGDocID)
 			}
 		}
 

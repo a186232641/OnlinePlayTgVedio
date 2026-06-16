@@ -128,6 +128,21 @@ func (m *Manager) Touch(ctx context.Context, docID int64) {
 	_ = m.db.TouchCache(ctx, docID)
 }
 
+// InvalidateCorrupt drops a cached file that failed a serve-time integrity check
+// (wrong on-disk size) and resets its entry so the next play re-downloads it.
+// The pinned flag is preserved so favorites stay pinned across the re-download.
+func (m *Manager) InvalidateCorrupt(ctx context.Context, docID int64) {
+	if m == nil || docID == 0 {
+		return
+	}
+	if err := os.Remove(m.videoPath(docID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		slog.Warn("invalidate corrupt cache: remove file", "doc_id", docID, "err", err)
+	}
+	if err := m.db.MarkCacheIncomplete(ctx, docID); err != nil {
+		slog.Warn("invalidate corrupt cache: mark incomplete", "doc_id", docID, "err", err)
+	}
+}
+
 // EnsureCached schedules a background full-file download for a played video so
 // future plays/seeks serve from disk. The entry is unpinned (LRU-evictable).
 // No-op if already cached, already queued, or the locator isn't resolved yet.
@@ -261,6 +276,16 @@ func (m *Manager) downloadDoc(ctx context.Context, v *db.Video) error {
 	if err != nil {
 		_ = os.Remove(tmp)
 		return err
+	}
+	// Integrity gate: a multi-threaded download that dropped bytes under a flaky
+	// link leaves a truncated file. It would still stream fine straight from
+	// Telegram (correct bytes), but served off disk the browser gets a corrupt
+	// stream and fails to decode (MEDIA_ERR DECODE). Telegram's Document.Size ==
+	// file_size, so an exact mismatch means the file is incomplete — discard it
+	// and let the next play re-stream from TG + re-enqueue the download.
+	if v.FileSize > 0 && size != v.FileSize {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("download size mismatch for doc %d: got %d, want %d", v.TGDocID, size, v.FileSize)
 	}
 	if err := os.Rename(tmp, final); err != nil {
 		_ = os.Remove(tmp)
