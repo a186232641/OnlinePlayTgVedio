@@ -8,6 +8,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,8 +23,6 @@ import (
 	"github.com/hanfeilong/onlineplaytgvideo/internal/tgmanager"
 )
 
-// Manager owns the on-disk cache directory, the background download worker
-// for favorites, and the periodic LRU eviction job.
 type Manager struct {
 	cfg *config.Config
 	db  *db.DB
@@ -35,15 +36,14 @@ type Manager struct {
 	stopCh   chan struct{}
 }
 
+type diskFile struct {
+	DocID int64
+	Path  string
+	Bytes int64
+}
+
 func New(cfg *config.Config, database *db.DB, mgr *tgmanager.Manager) *Manager {
-	return &Manager{
-		cfg:    cfg,
-		db:     database,
-		tg:     mgr,
-		queue:  make(chan int64, 256),
-		queued: map[int64]struct{}{},
-		stopCh: make(chan struct{}),
-	}
+	return &Manager{cfg: cfg, db: database, tg: mgr, queue: make(chan int64, 256), queued: map[int64]struct{}{}, stopCh: make(chan struct{})}
 }
 
 func (m *Manager) Start(ctx context.Context) error {
@@ -58,19 +58,13 @@ func (m *Manager) Start(ctx context.Context) error {
 	return nil
 }
 
-func (m *Manager) Stop() {
-	m.stopOnce.Do(func() { close(m.stopCh) })
-}
-
+func (m *Manager) Stop()            { m.stopOnce.Do(func() { close(m.stopCh) }) }
 func (m *Manager) videoDir() string { return filepath.Join(m.cfg.CacheDir, "videos") }
 func (m *Manager) tmpDir() string   { return filepath.Join(m.cfg.CacheDir, "videos", "tmp") }
-
 func (m *Manager) videoPath(docID int64) string {
 	return filepath.Join(m.videoDir(), fmt.Sprintf("%d.bin", docID))
 }
 
-// CompletePathFor returns the absolute path of a fully cached file for docID,
-// or ok=false if not present.
 func (m *Manager) CompletePathFor(ctx context.Context, docID int64) (string, bool) {
 	c, err := m.db.GetCacheEntry(ctx, docID)
 	if err != nil || !c.Completed {
@@ -83,13 +77,8 @@ func (m *Manager) CompletePathFor(ctx context.Context, docID int64) (string, boo
 	return abs, true
 }
 
-func (m *Manager) Touch(ctx context.Context, docID int64) {
-	_ = m.db.TouchCache(ctx, docID)
-}
+func (m *Manager) Touch(ctx context.Context, docID int64) { _ = m.db.TouchCache(ctx, docID) }
 
-// MaybeTee returns a writer that mirrors the ongoing stream into a partial
-// cache file when (a) the video is favorited, (b) the byte range starts at
-// offset 0, and (c) no complete cache file exists yet. Otherwise ok=false.
 func (m *Manager) MaybeTee(ctx context.Context, v *db.Video, start int64) (io.Writer, func(), bool) {
 	if start != 0 {
 		return nil, nil, false
@@ -98,8 +87,6 @@ func (m *Manager) MaybeTee(ctx context.Context, v *db.Video, start int64) (io.Wr
 	if err == nil && c.Completed {
 		return nil, nil, false
 	}
-	// Pinned (i.e. favorite) mirrors. Non-pinned: skip mirroring (already
-	// causes more disk IO than it's worth — eviction would just delete it).
 	if err == nil && !c.Pinned {
 		return nil, nil, false
 	}
@@ -107,7 +94,7 @@ func (m *Manager) MaybeTee(ctx context.Context, v *db.Video, start int64) (io.Wr
 		return nil, nil, false
 	}
 	if err == db.ErrNotFound {
-		return nil, nil, false // not even queued — let the worker handle it
+		return nil, nil, false
 	}
 	if err := os.MkdirAll(m.tmpDir(), 0o755); err != nil {
 		return nil, nil, false
@@ -123,9 +110,6 @@ func (m *Manager) MaybeTee(ctx context.Context, v *db.Video, start int64) (io.Wr
 		if err != nil {
 			return
 		}
-		// Only promote a fully-finished tee — but we don't know full size in
-		// this path. Treat as complete only when written bytes equal the
-		// recorded video size.
 		if st.Size() != v.FileSize {
 			_ = os.Remove(tmpPath)
 			return
@@ -137,19 +121,11 @@ func (m *Manager) MaybeTee(ctx context.Context, v *db.Video, start int64) (io.Wr
 			return
 		}
 		rel, _ := filepath.Rel(m.cfg.CacheDir, final)
-		_ = m.db.UpsertCacheEntry(context.Background(), &db.CacheEntry{
-			TGDocID:   v.TGDocID,
-			FilePath:  rel,
-			Bytes:     st.Size(),
-			Pinned:    true,
-			Completed: true,
-		})
+		_ = m.db.UpsertCacheEntry(context.Background(), &db.CacheEntry{TGDocID: v.TGDocID, FilePath: rel, Bytes: st.Size(), Pinned: true, Completed: true})
 	}
 	return f, finish, true
 }
 
-// EnqueueFavorite is called when a user adds a favorite. It marks the doc
-// pinned and (if no complete file exists yet) schedules a background download.
 func (m *Manager) EnqueueFavorite(userID, videoID int64) {
 	ctx := context.Background()
 	docID, completed, err := m.db.PinByVideoID(ctx, videoID)
@@ -160,13 +136,7 @@ func (m *Manager) EnqueueFavorite(userID, videoID int64) {
 	if completed {
 		return
 	}
-	// Make sure a placeholder exists so future MaybeTee can run.
-	_ = m.db.UpsertCacheEntry(ctx, &db.CacheEntry{
-		TGDocID:  docID,
-		FilePath: relPath("videos", fmt.Sprintf("%d.bin", docID)),
-		Pinned:   true,
-	})
-
+	_ = m.db.UpsertCacheEntry(ctx, &db.CacheEntry{TGDocID: docID, FilePath: relPath("videos", fmt.Sprintf("%d.bin", docID)), Pinned: true})
 	m.mu.Lock()
 	if _, ok := m.queued[videoID]; ok {
 		m.mu.Unlock()
@@ -174,16 +144,12 @@ func (m *Manager) EnqueueFavorite(userID, videoID int64) {
 	}
 	m.queued[videoID] = struct{}{}
 	m.mu.Unlock()
-
 	select {
 	case m.queue <- videoID:
 	default:
-		// queue is full; drop request — gcLoop will retry pinned not-completed
 	}
 }
 
-// HandleUnfavorite is called when a favorite is removed. It unpins the cache
-// entry only if no other user still has it favorited.
 func (m *Manager) HandleUnfavorite(userID, videoID int64) {
 	_ = m.db.UnpinIfNotFavorited(context.Background(), videoID)
 }
@@ -219,28 +185,19 @@ func (m *Manager) downloadFavorite(ctx context.Context, videoID int64) error {
 	if err != nil {
 		return err
 	}
-
-	// Skip if a fresh complete file already exists.
 	if c, err := m.db.GetCacheEntry(ctx, v.TGDocID); err == nil && c.Completed {
 		return nil
 	}
-
 	if err := os.MkdirAll(m.tmpDir(), 0o755); err != nil {
 		return err
 	}
 	tmp := filepath.Join(m.tmpDir(), fmt.Sprintf("%d.dl", v.TGDocID))
 	final := m.videoPath(v.TGDocID)
-
 	dl := downloader.NewDownloader().WithPartSize(512 * 1024)
-	loc := &tg.InputDocumentFileLocation{
-		ID:            v.TGDocID,
-		AccessHash:    v.AccessHash,
-		FileReference: v.FileReference,
-	}
+	loc := &tg.InputDocumentFileLocation{ID: v.TGDocID, AccessHash: v.AccessHash, FileReference: v.FileReference}
 	if _, err := dl.Download(cli.API, loc).ToPath(ctx, tmp); err != nil {
 		_ = os.Remove(tmp)
 		if tgerr.Is(err, "FILE_REFERENCE_EXPIRED") {
-			// caller will retry next cycle; we don't try to refresh here.
 			return fmt.Errorf("file_reference expired (will retry): %w", err)
 		}
 		return err
@@ -253,26 +210,13 @@ func (m *Manager) downloadFavorite(ctx context.Context, videoID int64) error {
 		return err
 	}
 	rel, _ := filepath.Rel(m.cfg.CacheDir, final)
-	return m.db.UpsertCacheEntry(ctx, &db.CacheEntry{
-		TGDocID:   v.TGDocID,
-		FilePath:  rel,
-		Bytes:     st.Size(),
-		Pinned:    true,
-		Completed: true,
-	})
+	return m.db.UpsertCacheEntry(ctx, &db.CacheEntry{TGDocID: v.TGDocID, FilePath: rel, Bytes: st.Size(), Pinned: true, Completed: true})
 }
 
 func (m *Manager) lookupVideoForDownload(ctx context.Context, videoID int64) (*db.Video, error) {
-	row := m.db.QueryRow(ctx, `
-        SELECT id, user_id, channel_id, tg_msg_id,
-               COALESCE(tg_doc_id, 0), COALESCE(access_hash, 0), file_reference,
-               COALESCE(mime_type, ''), COALESCE(file_size, 0)
-        FROM videos WHERE id=$1
-    `, videoID)
+	row := m.db.QueryRow(ctx, `SELECT id, user_id, channel_id, tg_msg_id, COALESCE(tg_doc_id, 0), COALESCE(access_hash, 0), file_reference, COALESCE(mime_type, ''), COALESCE(file_size, 0) FROM videos WHERE id=$1`, videoID)
 	v := &db.Video{}
-	if err := row.Scan(&v.ID, &v.UserID, &v.ChannelID, &v.TGMsgID,
-		&v.TGDocID, &v.AccessHash, &v.FileReference,
-		&v.MimeType, &v.FileSize); err != nil {
+	if err := row.Scan(&v.ID, &v.UserID, &v.ChannelID, &v.TGMsgID, &v.TGDocID, &v.AccessHash, &v.FileReference, &v.MimeType, &v.FileSize); err != nil {
 		return nil, err
 	}
 	return v, nil
@@ -281,7 +225,6 @@ func (m *Manager) lookupVideoForDownload(ctx context.Context, videoID int64) (*d
 func (m *Manager) gcLoop(ctx context.Context) {
 	t := time.NewTicker(5 * time.Minute)
 	defer t.Stop()
-	// run once immediately
 	m.evictIfNeeded(ctx)
 	for {
 		select {
@@ -295,42 +238,139 @@ func (m *Manager) gcLoop(ctx context.Context) {
 	}
 }
 
+// evictIfNeeded reconciles the database inventory with the actual video
+// directory, removes stale files, then enforces the configured cap using real
+// on-disk bytes. DB accounting alone cannot see files left by a crash between
+// rename and DB upsert.
 func (m *Manager) evictIfNeeded(ctx context.Context) {
 	cap := m.cfg.CacheCapBytes()
 	if cap <= 0 {
 		return
 	}
-	total, err := m.db.TotalCacheBytes(ctx)
+	files, total, err := scanVideoFiles(m.videoDir())
 	if err != nil {
-		slog.Warn("cache total query", "err", err)
+		slog.Warn("scan cache directory", "err", err)
 		return
+	}
+	entries, err := m.db.AllCompletedCacheEntries(ctx)
+	if err != nil {
+		slog.Warn("load cache inventory", "err", err)
+		return
+	}
+	byDoc := make(map[int64]db.CacheEntry, len(entries))
+	for _, e := range entries {
+		byDoc[e.TGDocID] = e
+	}
+	var orphanBytes int64
+	for _, f := range files {
+		if _, ok := byDoc[f.DocID]; ok {
+			continue
+		}
+		if err := os.Remove(f.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("remove orphan cache file", "path", f.Path, "err", err)
+			continue
+		}
+		total -= f.Bytes
+		orphanBytes += f.Bytes
+		slog.Info("orphan cache removed", "doc_id", f.DocID, "bytes", f.Bytes)
+	}
+	if orphanBytes > 0 {
+		slog.Warn("cache reconciliation removed orphan files", "bytes", orphanBytes)
+	}
+	present := make(map[int64]struct{}, len(files))
+	fileByDoc := make(map[int64]diskFile, len(files))
+	for _, f := range files {
+		present[f.DocID] = struct{}{}
+		fileByDoc[f.DocID] = f
+	}
+	for _, e := range entries {
+		if _, ok := present[e.TGDocID]; !ok {
+			if err := m.db.DeleteCacheEntry(ctx, e.TGDocID); err != nil {
+				slog.Warn("delete stale cache record", "doc_id", e.TGDocID, "err", err)
+			}
+		}
+	}
+	candidates := make([]db.CacheEntry, 0, len(entries))
+	for _, e := range entries {
+		if f, ok := fileByDoc[e.TGDocID]; ok {
+			e.Bytes = f.Bytes
+			candidates = append(candidates, e)
+		}
 	}
 	if total <= cap {
+		slog.Info("cache capacity check", "disk_bytes", total, "cap_bytes", cap, "evicted_bytes", int64(0))
 		return
 	}
-	cands, err := m.db.LRUCandidates(ctx, 100)
-	if err != nil {
-		slog.Warn("lru candidates", "err", err)
-		return
-	}
-	for _, c := range cands {
+	// Unpinned caches go first. If pinned favorites alone exceed the cap, strict
+	// disk protection wins and least-recently-used pinned files are reclaimed too.
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].Pinned != candidates[j].Pinned {
+			return !candidates[i].Pinned
+		}
+		return candidates[i].LastAccessedAt.Before(candidates[j].LastAccessedAt)
+	})
+	var evicted, evictedBytes int64
+	for _, e := range candidates {
 		if total <= cap {
 			break
 		}
-		abs := filepath.Join(m.cfg.CacheDir, c.FilePath)
-		if err := os.Remove(abs); err != nil && !errors.Is(err, os.ErrNotExist) {
-			slog.Warn("evict file", "path", abs, "err", err)
+		f, ok := fileByDoc[e.TGDocID]
+		if !ok {
 			continue
 		}
-		_ = m.db.DeleteCacheEntry(ctx, c.TGDocID)
-		total -= c.Bytes
-		slog.Info("cache evicted", "doc_id", c.TGDocID, "bytes", c.Bytes)
+		if err := os.Remove(f.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("evict cache file", "path", f.Path, "err", err)
+			continue
+		}
+		if err := m.db.DeleteCacheEntry(ctx, e.TGDocID); err != nil {
+			slog.Warn("delete evicted cache record", "doc_id", e.TGDocID, "err", err)
+		}
+		total -= f.Bytes
+		evictedBytes += f.Bytes
+		evicted++
+		slog.Info("cache evicted", "doc_id", e.TGDocID, "bytes", f.Bytes, "pinned", e.Pinned)
+	}
+	slog.Info("cache capacity check", "disk_bytes", total, "cap_bytes", cap, "evicted_files", evicted, "evicted_bytes", evictedBytes)
+	if total > cap {
+		slog.Error("cache remains above cap after eviction", "disk_bytes", total, "cap_bytes", cap)
 	}
 }
 
-func (m *Manager) cleanPartials() error {
-	dir := m.tmpDir()
+func scanVideoFiles(dir string) ([]diskFile, int64, error) {
 	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, 0, nil
+		}
+		return nil, 0, err
+	}
+	files := make([]diskFile, 0, len(entries))
+	var total int64
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".bin") {
+			continue
+		}
+		docID, err := strconv.ParseInt(strings.TrimSuffix(entry.Name(), ".bin"), 10, 64)
+		if err != nil || docID <= 0 {
+			slog.Warn("ignore invalid cache filename", "name", entry.Name())
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil, 0, err
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		f := diskFile{DocID: docID, Path: filepath.Join(dir, entry.Name()), Bytes: info.Size()}
+		files = append(files, f)
+		total += f.Bytes
+	}
+	return files, total, nil
+}
+
+func (m *Manager) cleanPartials() error {
+	entries, err := os.ReadDir(m.tmpDir())
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
@@ -338,9 +378,8 @@ func (m *Manager) cleanPartials() error {
 		return err
 	}
 	for _, e := range entries {
-		_ = os.Remove(filepath.Join(dir, e.Name()))
+		_ = os.Remove(filepath.Join(m.tmpDir(), e.Name()))
 	}
 	return nil
 }
-
 func relPath(parts ...string) string { return filepath.Join(parts...) }
