@@ -1,8 +1,10 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 
 import { api, Channel, Video } from "../api/client";
 import { VideoGrid } from "../components/VideoGrid";
+import { SortSelect, SortValue, normalizeSort, DEFAULT_SORT } from "../components/SortSelect";
 
 interface Page { videos: Video[] }
 
@@ -14,23 +16,46 @@ interface Filters {
   dateFrom: string; // yyyy-mm-dd
   dateTo: string;
   channelID: number;
+  order: SortValue;
 }
 
-const emptyFilters: Filters = {
-  text: "",
-  fileName: "",
-  dateFrom: "",
-  dateTo: "",
-  channelID: 0,
-};
+// The URL query string is the single source of truth for the active search, so
+// navigating into a video and pressing Back restores the exact same results.
+// `draft` is the editable form state; submitting copies it into the URL.
+function filtersFromParams(p: URLSearchParams): Filters {
+  return {
+    text: p.get("text") ?? "",
+    fileName: p.get("file_name") ?? "",
+    dateFrom: p.get("date_from") ?? "",
+    dateTo: p.get("date_to") ?? "",
+    channelID: Number(p.get("channel_id") ?? "0") || 0,
+    order: normalizeSort(p.get("order")),
+  };
+}
+
+function paramsFromFilters(f: Filters): URLSearchParams {
+  const p = new URLSearchParams();
+  if (f.text) p.set("text", f.text);
+  if (f.fileName) p.set("file_name", f.fileName);
+  if (f.dateFrom) p.set("date_from", f.dateFrom);
+  if (f.dateTo) p.set("date_to", f.dateTo);
+  if (f.channelID > 0) p.set("channel_id", String(f.channelID));
+  if (f.order !== DEFAULT_SORT) p.set("order", f.order);
+  return p;
+}
 
 function hasAny(f: Filters): boolean {
   return !!(f.text || f.fileName || f.dateFrom || f.dateTo);
 }
 
 export function Search() {
-  const [draft, setDraft] = useState<Filters>(emptyFilters);
-  const [submitted, setSubmitted] = useState<Filters>(emptyFilters);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const submitted = useMemo(() => filtersFromParams(searchParams), [searchParams]);
+
+  const [draft, setDraft] = useState<Filters>(submitted);
+  // Re-sync the form whenever the URL changes from outside the form (Back nav,
+  // sort change) so the inputs reflect the active search.
+  useEffect(() => { setDraft(submitted); }, [searchParams]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const channels = useQuery<{ channels: Channel[] }>({
     queryKey: ["channels", "all"],
@@ -49,6 +74,7 @@ export function Search() {
       if (submitted.dateFrom) qs.set("date_from", submitted.dateFrom);
       if (submitted.dateTo) qs.set("date_to", submitted.dateTo);
       if (submitted.channelID > 0) qs.set("channel_id", String(submitted.channelID));
+      if (submitted.order !== DEFAULT_SORT) qs.set("order", submitted.order);
       if (cursor > 0) qs.set("offset_id", String(cursor));
       return api.get<Page>(`/api/videos/search?${qs}`);
     },
@@ -63,10 +89,15 @@ export function Search() {
     [result.data],
   );
 
+  // Sort applies immediately to the active search (re-sorts the URL), keeping
+  // the rest of the submitted filters untouched.
+  const changeOrder = (order: SortValue) =>
+    setSearchParams(paramsFromFilters({ ...submitted, order }));
+
   return (
     <div>
       <form
-        onSubmit={(e) => { e.preventDefault(); setSubmitted({ ...draft }); }}
+        onSubmit={(e) => { e.preventDefault(); setSearchParams(paramsFromFilters(draft)); }}
         className="p-4 border-b border-slate-800 grid gap-2 sm:grid-cols-2 lg:grid-cols-5"
       >
         <input
@@ -115,7 +146,7 @@ export function Search() {
           <button className="flex-1 px-4 py-2 bg-emerald-700 hover:bg-emerald-600 rounded text-sm">搜索</button>
           <button
             type="button"
-            onClick={() => { setDraft(emptyFilters); setSubmitted(emptyFilters); }}
+            onClick={() => setSearchParams(new URLSearchParams())}
             className="px-3 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm"
           >清空</button>
         </div>
@@ -133,7 +164,14 @@ export function Search() {
 
       {hasAny(submitted) && result.data && (
         <>
-          <div className="px-6 pt-4 text-xs text-slate-500">命中 {all.length} 条</div>
+          <div className="px-6 pt-4 flex items-center gap-3 flex-wrap">
+            <span className="text-xs text-slate-500">命中 {all.length} 条</span>
+            <SortSelect
+              value={submitted.order}
+              onChange={changeOrder}
+              className="ml-auto px-3 py-1.5 bg-slate-800 rounded text-sm"
+            />
+          </div>
           <VideoGrid
             videos={all}
             linkTo={(v) => {
@@ -143,6 +181,7 @@ export function Search() {
               if (submitted.dateFrom) p.set("date_from", submitted.dateFrom);
               if (submitted.dateTo) p.set("date_to", submitted.dateTo);
               if (submitted.channelID > 0) p.set("ch", String(submitted.channelID));
+              if (submitted.order !== DEFAULT_SORT) p.set("order", submitted.order);
               return `/videos/${v.id}?${p}`;
             }}
           />

@@ -46,6 +46,10 @@ type Video struct {
 	TGDocID       int64
 	AccessHash    int64
 	FileReference []byte
+
+	// DCID is the data center the document lives on (0 = unknown). Used to route
+	// file transfers through the right per-DC connection pool.
+	DCID int
 }
 
 // All columns prefixed with v. so SELECT works even when the FROM clause
@@ -63,7 +67,7 @@ const videoCols = `
     COALESCE(v.duration_seconds, 0), COALESCE(v.width, 0), COALESCE(v.height, 0),
     COALESCE(v.text, ''), v.text_entities,
     COALESCE(v.tg_doc_id, 0), COALESCE(v.access_hash, 0), v.file_reference,
-    COALESCE(v.grouped_id, 0)
+    COALESCE(v.grouped_id, 0), COALESCE(v.dc_id, 0)
 `
 
 func scanVideo(row pgx.Row) (*Video, error) {
@@ -79,7 +83,7 @@ func scanVideo(row pgx.Row) (*Video, error) {
 		&v.DurationSeconds, &v.Width, &v.Height,
 		&v.Text, &v.TextEntities,
 		&v.TGDocID, &v.AccessHash, &v.FileReference,
-		&v.GroupedID,
+		&v.GroupedID, &v.DCID,
 	); err != nil {
 		return nil, err
 	}
@@ -97,7 +101,7 @@ func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
             thumbnail, thumbnail_file_size,
             media_type, mime_type,
             duration_seconds, width, height,
-            text, text_entities, grouped_id
+            text, text_entities, grouped_id, dc_id
         ) VALUES (
             $1,$2,
             $3,$4,$5,$6,
@@ -106,7 +110,7 @@ func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
             $12,$13,
             $14,$15,
             $16,$17,$18,
-            $19,$20,$21
+            $19,$20,$21,$22
         )
         ON CONFLICT (user_id, channel_id, tg_msg_id) DO UPDATE SET
             msg_type            = EXCLUDED.msg_type,
@@ -128,7 +132,9 @@ func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
             -- caption we propagated to it; keep the existing text in that case.
             text                = COALESCE(NULLIF(EXCLUDED.text, ''), videos.text),
             text_entities       = EXCLUDED.text_entities,
-            grouped_id          = EXCLUDED.grouped_id
+            grouped_id          = EXCLUDED.grouped_id,
+            -- Keep a known DC if a later re-import (e.g. JSON) carries 0.
+            dc_id               = CASE WHEN EXCLUDED.dc_id > 0 THEN EXCLUDED.dc_id ELSE videos.dc_id END
         RETURNING id
     `,
 		v.UserID, v.ChannelID,
@@ -138,7 +144,7 @@ func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
 		nilIfEmpty(v.Thumbnail), v.ThumbnailFileSize,
 		nilIfEmpty(v.MediaType), nilIfEmpty(v.MimeType),
 		v.DurationSeconds, v.Width, v.Height,
-		nilIfEmpty(v.Text), v.TextEntities, nilIfZero64(v.GroupedID),
+		nilIfEmpty(v.Text), v.TextEntities, nilIfZero64(v.GroupedID), v.DCID,
 	)
 	var id int64
 	if err := row.Scan(&id); err != nil {
@@ -182,17 +188,18 @@ func (d *DB) PropagateGroupCaption(ctx context.Context, userID, channelID, group
 }
 
 // UpdateVideoLocator persists the TG streaming locator after first refresh.
-// FileSize is overwritten only when newSize > 0; same for mime_type.
-func (d *DB) UpdateVideoLocator(ctx context.Context, id int64, tgDocID, accessHash int64, fr []byte, newSize int64, newMime string) error {
+// FileSize is overwritten only when newSize > 0; same for mime_type and dc_id.
+func (d *DB) UpdateVideoLocator(ctx context.Context, id int64, tgDocID, accessHash int64, fr []byte, newSize int64, newMime string, dcID int) error {
 	_, err := d.Exec(ctx, `
         UPDATE videos SET
             tg_doc_id      = $2,
             access_hash    = $3,
             file_reference = $4,
             file_size      = CASE WHEN $5 > 0 THEN $5 ELSE file_size END,
-            mime_type      = COALESCE(NULLIF($6, ''), mime_type)
+            mime_type      = COALESCE(NULLIF($6, ''), mime_type),
+            dc_id          = CASE WHEN $7 > 0 THEN $7 ELSE dc_id END
         WHERE id=$1
-    `, id, tgDocID, accessHash, fr, newSize, newMime)
+    `, id, tgDocID, accessHash, fr, newSize, newMime, dcID)
 	return err
 }
 
@@ -258,6 +265,41 @@ type ListVideosOpts struct {
 	Streamer       string
 }
 
+// orderColumn maps an order key to the sort column and direction. An empty
+// column means "no composite keyset" (duration / unknown) — fall back to a
+// plain id cursor. Any unrecognized key is treated as the default date DESC.
+func orderColumn(orderBy string) (col string, asc bool) {
+	switch orderBy {
+	case "date_asc":
+		return "date", true
+	case "name_asc":
+		return "file_name", true
+	case "name_desc":
+		return "file_name", false
+	case "duration":
+		return "", false
+	default: // "" / "date_desc"
+		return "date", false
+	}
+}
+
+// orderClause returns the ORDER BY for a given order key. id is always the
+// tie-breaker in the same direction so the (col, id) tuple is a total order,
+// which the keyset cursor relies on. NULLS LAST keeps captionless/undated rows
+// at the tail in both directions.
+func orderClause(orderBy string) string {
+	col, asc := orderColumn(orderBy)
+	if col == "" {
+		// duration (or unknown non-date/name) — keep the legacy clause.
+		return " ORDER BY v.duration_seconds DESC, v.id DESC"
+	}
+	dir := "DESC"
+	if asc {
+		dir = "ASC"
+	}
+	return " ORDER BY v." + col + " " + dir + " NULLS LAST, v.id " + dir
+}
+
 // keysetCursor builds the WHERE condition for "rows after the boundary row
 // whose id = $p", matching the list's ORDER BY. The boundary row's sort key is
 // looked up by id server-side, so callers only need to pass offset_id (no extra
@@ -267,16 +309,25 @@ type ListVideosOpts struct {
 // plain `id < $p` cursor is WRONG: id is BIGSERIAL (insert order) while sync
 // writes incremental-at-top / backfill-at-bottom, so id order ≠ date order, and
 // the mismatch makes a page come up short and pagination stop early. The
-// composite (date, id) keyset below fixes that.
+// composite (col, id) keyset below fixes that for date and file_name ordering;
+// duration keeps the simple id cursor (not frontend-paginated).
 func keysetCursor(orderBy, p string) string {
-	if orderBy == "duration" {
-		// Duration ordering isn't paginated by the frontend; keep it simple.
+	col, asc := orderColumn(orderBy)
+	if col == "" {
 		return "v.id < $" + p
 	}
-	cur := "(SELECT date FROM videos WHERE id = $" + p + ")"
+	cmp := "<"
+	if asc {
+		cmp = ">"
+	}
+	c := "v." + col
+	cur := "(SELECT " + col + " FROM videos WHERE id = $" + p + ")"
+	// Boundary in the NULL tail ⇒ only later NULLs (by id, same direction).
+	// Otherwise: strictly past the boundary value, the tie broken by id, plus
+	// the whole NULL tail (which sorts after any non-NULL value).
 	return "CASE WHEN " + cur + " IS NULL " +
-		"THEN (v.date IS NULL AND v.id < $" + p + ") " +
-		"ELSE (v.date < " + cur + " OR (v.date = " + cur + " AND v.id < $" + p + ") OR v.date IS NULL) END"
+		"THEN (" + c + " IS NULL AND v.id " + cmp + " $" + p + ") " +
+		"ELSE (" + c + " " + cmp + " " + cur + " OR (" + c + " = " + cur + " AND v.id " + cmp + " $" + p + ") OR " + c + " IS NULL) END"
 }
 
 func (d *DB) ListVideos(ctx context.Context, opt ListVideosOpts) ([]Video, error) {
@@ -306,11 +357,7 @@ func (d *DB) ListVideos(ctx context.Context, opt ListVideosOpts) ([]Video, error
 		q += ` JOIN favorites f ON f.video_id=v.id AND f.user_id=v.user_id `
 	}
 	q += ` WHERE ` + joinWhere(where)
-	if opt.OrderBy == "duration" {
-		q += ` ORDER BY v.duration_seconds DESC, v.id DESC`
-	} else {
-		q += ` ORDER BY v.date DESC NULLS LAST, v.id DESC`
-	}
+	q += orderClause(opt.OrderBy)
 	args = append(args, opt.Limit)
 	q += ` LIMIT $` + itoa(len(args))
 	rows, err := d.Query(ctx, q, args...)
@@ -354,6 +401,8 @@ type SearchVideosOpts struct {
 	ChannelID int64
 	Limit     int
 	OffsetID  int64
+	OrderBy   string
+	FavOnly   bool // restrict to the user's favorites (JOIN favorites)
 }
 
 func (d *DB) SearchVideos(ctx context.Context, opt SearchVideosOpts) ([]Video, error) {
@@ -389,11 +438,15 @@ func (d *DB) SearchVideos(ctx context.Context, opt SearchVideosOpts) ([]Video, e
 	}
 	if opt.OffsetID > 0 {
 		args = append(args, opt.OffsetID)
-		where = append(where, keysetCursor("", itoa(len(args))))
+		where = append(where, keysetCursor(opt.OrderBy, itoa(len(args))))
 	}
 	args = append(args, opt.Limit)
-	q := `SELECT ` + videoCols + ` FROM videos v WHERE ` + joinWhere(where) +
-		` ORDER BY v.date DESC NULLS LAST, v.id DESC LIMIT $` + itoa(len(args))
+	from := `FROM videos v `
+	if opt.FavOnly {
+		from += `JOIN favorites f ON f.video_id=v.id AND f.user_id=v.user_id `
+	}
+	q := `SELECT ` + videoCols + ` ` + from + `WHERE ` + joinWhere(where) +
+		orderClause(opt.OrderBy) + ` LIMIT $` + itoa(len(args))
 	rows, err := d.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err

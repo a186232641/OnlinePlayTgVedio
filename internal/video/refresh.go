@@ -87,13 +87,14 @@ func RefreshFileReference(ctx context.Context, database *db.DB, mgr *tgmanager.M
 		v.TGDocID = doc.ID
 		v.AccessHash = doc.AccessHash
 		v.FileReference = doc.FileReference
+		v.DCID = doc.DCID
 		if v.FileSize == 0 {
 			v.FileSize = doc.Size
 		}
 		if v.MimeType == "" {
 			v.MimeType = doc.MimeType
 		}
-		if err := database.UpdateVideoLocator(ctx, v.ID, doc.ID, doc.AccessHash, doc.FileReference, doc.Size, doc.MimeType); err != nil {
+		if err := database.UpdateVideoLocator(ctx, v.ID, doc.ID, doc.AccessHash, doc.FileReference, doc.Size, doc.MimeType, doc.DCID); err != nil {
 			return fmt.Errorf("update locator: %w", err)
 		}
 		return nil

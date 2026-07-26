@@ -110,6 +110,7 @@ func (h *VideosHandlers) Search(w http.ResponseWriter, r *http.Request) {
 		ChannelID: channelID,
 		Limit:     limit,
 		OffsetID:  offsetID,
+		OrderBy:   qv.Get("order"),
 	})
 	if err != nil {
 		httpx.WriteError(w, err)

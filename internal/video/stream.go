@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -83,12 +84,28 @@ func (s *StreamServer) Handler() http.HandlerFunc {
 			"range", r.Header.Get("Range"),
 		)
 
-		// Fast path: cached file present and complete.
+		// Fast path: cached file present, complete, and the right size.
 		if v.TGDocID != 0 {
 			if path, ok := s.Cache.CompletePathFor(r.Context(), v.TGDocID); ok {
-				s.Cache.Touch(r.Context(), v.TGDocID)
-				http.ServeFile(w, r, path)
-				return
+				if fi, statErr := os.Stat(path); statErr == nil && (v.FileSize <= 0 || fi.Size() == v.FileSize) {
+					s.Cache.Touch(r.Context(), v.TGDocID)
+					// Mirror the from-Telegram Content-Type; ServeFile would
+					// otherwise sniff the extensionless .bin and can hand iOS
+					// Safari the wrong type for non-MP4 containers.
+					mime := v.MimeType
+					if mime == "" {
+						mime = "video/mp4"
+					}
+					w.Header().Set("Content-Type", mime)
+					http.ServeFile(w, r, path)
+					return
+				}
+				// Cached file is missing or the wrong size (a truncated earlier
+				// download): it streams fine from Telegram but fails to decode in
+				// the browser. Drop it and fall through to streaming from TG.
+				slog.Warn("cached file failed integrity check, re-streaming",
+					"video_id", v.ID, "tg_doc_id", v.TGDocID, "want_size", v.FileSize)
+				s.Cache.InvalidateCorrupt(r.Context(), v.TGDocID)
 			}
 		}
 
@@ -118,6 +135,17 @@ func (s *StreamServer) serveFromTelegram(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	// Kick off a background multi-threaded full-file download into the cache.
+	// Idempotent: no-op if already cached or queued. Future plays/seeks then
+	// serve straight from disk instead of re-streaming from Telegram.
+	if s.Cache != nil {
+		s.Cache.EnsureCached(v.ID)
+	}
+
+	// Route file reads straight to the document's DC via the pool — avoids the
+	// per-request DC migration that causes IO timeouts on the default client.
+	api := cli.APIForDC(v.DCID)
+
 	mime := v.MimeType
 	if mime == "" {
 		mime = "video/mp4"
@@ -133,7 +161,7 @@ func (s *StreamServer) serveFromTelegram(w http.ResponseWriter, r *http.Request,
 		if r.Method == http.MethodHead {
 			return
 		}
-		if err := s.streamRange(r.Context(), cli.API, v, 0, maxStream, w); err != nil {
+		if err := s.streamRange(r.Context(), api, v, 0, maxStream, w); err != nil {
 			if !errors.Is(err, context.Canceled) {
 				slog.Warn("stream(unknown size) failed", "video_id", v.ID, "err", err)
 			}
@@ -164,16 +192,7 @@ func (s *StreamServer) serveFromTelegram(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Open a TeeWriter into a partial cache file if this is a favorite.
-	var sink io.Writer = w
-	if s.Cache != nil {
-		if tee, finish, ok := s.Cache.MaybeTee(r.Context(), v, start); ok {
-			defer finish()
-			sink = io.MultiWriter(w, tee)
-		}
-	}
-
-	if err := s.streamRange(r.Context(), cli.API, v, start, end, sink); err != nil {
+	if err := s.streamRange(r.Context(), api, v, start, end, w); err != nil {
 		if !errors.Is(err, context.Canceled) {
 			slog.Warn("stream failed", "video_id", v.ID, "err", err)
 		}

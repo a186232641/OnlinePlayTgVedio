@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -23,15 +22,59 @@ import (
 	"github.com/hanfeilong/onlineplaytgvideo/internal/tgmanager"
 )
 
+const (
+	// cachePartSize is the per-request block for downloads. Telegram caps a
+	// single upload.getFile at 1 MiB and requires the part size to divide it.
+	cachePartSize = 1024 * 1024 // 1 MiB
+	// cacheMaxThreads caps the parallel connections used per file download.
+	cacheMaxThreads = 8
+)
+
+// threadLevels scales the download thread count by file size (mirrors tdl's
+// BestThreads): tiny files don't benefit from many connections.
+var threadLevels = []struct {
+	threads int
+	size    int64
+}{
+	{1, 1 << 20},
+	{2, 5 << 20},
+	{4, 20 << 20},
+	{8, 50 << 20},
+}
+
+func bestThreads(size int64, max int) int {
+	for _, l := range threadLevels {
+		if size < l.size {
+			return min(l.threads, max)
+		}
+	}
+	return max
+}
+
+// cacheJob is one queued download. docID lets the worker dedup and release the
+// in-flight slot even if the per-video lookup later fails.
+type cacheJob struct {
+	videoID int64
+	docID   int64
+}
+
+// Manager owns the on-disk cache directory, the background download worker, and
+// the periodic LRU eviction job. Every played video is cached (multi-threaded,
+// tdl-style); favorites are pinned so eviction never drops them.
 type Manager struct {
 	cfg *config.Config
 	db  *db.DB
 	tg  *tgmanager.Manager
 
-	queue chan int64
+	// RefreshLocator re-fetches a video's fresh file_reference when a download
+	// fails with FILE_REFERENCE_EXPIRED. Wired in main.go to video.RefreshFileReference
+	// (a function field avoids a cache↔video import cycle). May be nil.
+	RefreshLocator func(ctx context.Context, v *db.Video) error
+
+	queue chan cacheJob
 
 	mu       sync.Mutex
-	queued   map[int64]struct{}
+	queued   map[int64]struct{} // docIDs currently queued/in-flight
 	stopOnce sync.Once
 	stopCh   chan struct{}
 }
@@ -43,7 +86,14 @@ type diskFile struct {
 }
 
 func New(cfg *config.Config, database *db.DB, mgr *tgmanager.Manager) *Manager {
-	return &Manager{cfg: cfg, db: database, tg: mgr, queue: make(chan int64, 256), queued: map[int64]struct{}{}, stopCh: make(chan struct{})}
+	return &Manager{
+		cfg:    cfg,
+		db:     database,
+		tg:     mgr,
+		queue:  make(chan cacheJob, 256),
+		queued: map[int64]struct{}{},
+		stopCh: make(chan struct{}),
+	}
 }
 
 func (m *Manager) Start(ctx context.Context) error {
@@ -79,53 +129,49 @@ func (m *Manager) CompletePathFor(ctx context.Context, docID int64) (string, boo
 
 func (m *Manager) Touch(ctx context.Context, docID int64) { _ = m.db.TouchCache(ctx, docID) }
 
-func (m *Manager) MaybeTee(ctx context.Context, v *db.Video, start int64) (io.Writer, func(), bool) {
-	if start != 0 {
-		return nil, nil, false
+// InvalidateCorrupt drops a cached file that failed a serve-time integrity check
+// (wrong on-disk size) and resets its entry so the next play re-downloads it.
+// The pinned flag is preserved so favorites stay pinned across the re-download.
+func (m *Manager) InvalidateCorrupt(ctx context.Context, docID int64) {
+	if m == nil || docID == 0 {
+		return
 	}
-	c, err := m.db.GetCacheEntry(ctx, v.TGDocID)
-	if err == nil && c.Completed {
-		return nil, nil, false
+	if err := os.Remove(m.videoPath(docID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		slog.Warn("invalidate corrupt cache: remove file", "doc_id", docID, "err", err)
 	}
-	if err == nil && !c.Pinned {
-		return nil, nil, false
+	if err := m.db.MarkCacheIncomplete(ctx, docID); err != nil {
+		slog.Warn("invalidate corrupt cache: mark incomplete", "doc_id", docID, "err", err)
 	}
-	if err != nil && !errors.Is(err, db.ErrNotFound) {
-		return nil, nil, false
-	}
-	if err == db.ErrNotFound {
-		return nil, nil, false
-	}
-	if err := os.MkdirAll(m.tmpDir(), 0o755); err != nil {
-		return nil, nil, false
-	}
-	tmpPath := filepath.Join(m.tmpDir(), fmt.Sprintf("%d.part", v.TGDocID))
-	f, err := os.Create(tmpPath)
-	if err != nil {
-		return nil, nil, false
-	}
-	finish := func() {
-		_ = f.Close()
-		st, err := os.Stat(tmpPath)
-		if err != nil {
-			return
-		}
-		if st.Size() != v.FileSize {
-			_ = os.Remove(tmpPath)
-			return
-		}
-		final := m.videoPath(v.TGDocID)
-		if err := os.Rename(tmpPath, final); err != nil {
-			slog.Warn("promote cache tee", "err", err)
-			_ = os.Remove(tmpPath)
-			return
-		}
-		rel, _ := filepath.Rel(m.cfg.CacheDir, final)
-		_ = m.db.UpsertCacheEntry(context.Background(), &db.CacheEntry{TGDocID: v.TGDocID, FilePath: rel, Bytes: st.Size(), Pinned: true, Completed: true})
-	}
-	return f, finish, true
 }
 
+// EnsureCached schedules a background full-file download for a played video so
+// future plays/seeks serve from disk. The entry is unpinned (LRU-evictable).
+// No-op if already cached, already queued, or the locator isn't resolved yet.
+func (m *Manager) EnsureCached(videoID int64) {
+	if m == nil {
+		return
+	}
+	ctx := context.Background()
+	docID, err := m.db.LookupDocByVideoID(ctx, videoID)
+	if err != nil || docID == 0 {
+		return
+	}
+	if c, err := m.db.GetCacheEntry(ctx, docID); err == nil && c.Completed {
+		return
+	}
+	// Placeholder so the entry exists; bytes=0/completed=false keeps it out of
+	// the total and LRU until the download finishes. Upsert's OR semantics never
+	// un-pin an already-favorited entry.
+	_ = m.db.UpsertCacheEntry(ctx, &db.CacheEntry{
+		TGDocID:  docID,
+		FilePath: relPath("videos", fmt.Sprintf("%d.bin", docID)),
+		Pinned:   false,
+	})
+	m.submit(videoID, docID)
+}
+
+// EnqueueFavorite is called when a user adds a favorite: pin the doc and (if not
+// already cached) schedule the same background download.
 func (m *Manager) EnqueueFavorite(userID, videoID int64) {
 	ctx := context.Background()
 	docID, completed, err := m.db.PinByVideoID(ctx, videoID)
@@ -136,22 +182,40 @@ func (m *Manager) EnqueueFavorite(userID, videoID int64) {
 	if completed {
 		return
 	}
-	_ = m.db.UpsertCacheEntry(ctx, &db.CacheEntry{TGDocID: docID, FilePath: relPath("videos", fmt.Sprintf("%d.bin", docID)), Pinned: true})
+	_ = m.db.UpsertCacheEntry(ctx, &db.CacheEntry{
+		TGDocID:  docID,
+		FilePath: relPath("videos", fmt.Sprintf("%d.bin", docID)),
+		Pinned:   true,
+	})
+	m.submit(videoID, docID)
+}
+
+// HandleUnfavorite is called when a favorite is removed. It unpins the cache
+// entry only if no other user still has it favorited.
+func (m *Manager) HandleUnfavorite(userID, videoID int64) {
+	_ = m.db.UnpinIfNotFavorited(context.Background(), videoID)
+}
+
+// submit enqueues a download job, deduped by docID. A full queue drops the
+// request (a later play or GC pass re-submits it).
+func (m *Manager) submit(videoID, docID int64) {
+	if docID == 0 {
+		return
+	}
 	m.mu.Lock()
-	if _, ok := m.queued[videoID]; ok {
+	if _, ok := m.queued[docID]; ok {
 		m.mu.Unlock()
 		return
 	}
-	m.queued[videoID] = struct{}{}
+	m.queued[docID] = struct{}{}
 	m.mu.Unlock()
 	select {
-	case m.queue <- videoID:
+	case m.queue <- cacheJob{videoID: videoID, docID: docID}:
 	default:
+		m.mu.Lock()
+		delete(m.queued, docID)
+		m.mu.Unlock()
 	}
-}
-
-func (m *Manager) HandleUnfavorite(userID, videoID int64) {
-	_ = m.db.UnpinIfNotFavorited(context.Background(), videoID)
 }
 
 func (m *Manager) workerLoop(ctx context.Context) {
@@ -161,21 +225,35 @@ func (m *Manager) workerLoop(ctx context.Context) {
 			return
 		case <-ctx.Done():
 			return
-		case vid := <-m.queue:
-			if err := m.downloadFavorite(ctx, vid); err != nil {
-				slog.Warn("favorite download failed", "video_id", vid, "err", err)
-			}
+		case job := <-m.queue:
+			m.runDownload(ctx, job)
 			m.mu.Lock()
-			delete(m.queued, vid)
+			delete(m.queued, job.docID)
 			m.mu.Unlock()
 		}
 	}
 }
 
-func (m *Manager) downloadFavorite(ctx context.Context, videoID int64) error {
-	v, err := m.lookupVideoForDownload(ctx, videoID)
+func (m *Manager) runDownload(ctx context.Context, job cacheJob) {
+	v, err := m.lookupVideoForDownload(ctx, job.videoID)
 	if err != nil {
-		return err
+		slog.Warn("cache lookup video", "video_id", job.videoID, "err", err)
+		return
+	}
+	if err := m.downloadDoc(ctx, v); err != nil {
+		slog.Warn("cache download failed", "video_id", job.videoID, "doc_id", v.TGDocID, "err", err)
+	}
+}
+
+// downloadDoc downloads the whole document with the multi-threaded gotd
+// downloader (the tdl template), atomically promotes the temp file, records the
+// cache entry, and triggers eviction if the new file pushed us over the cap.
+func (m *Manager) downloadDoc(ctx context.Context, v *db.Video) error {
+	if v.TGDocID == 0 {
+		return fmt.Errorf("video %d has no document locator", v.ID)
+	}
+	if c, err := m.db.GetCacheEntry(ctx, v.TGDocID); err == nil && c.Completed {
+		return nil
 	}
 	ch, err := m.db.ChannelByID(ctx, v.ChannelID, v.UserID)
 	if err != nil {
@@ -185,38 +263,99 @@ func (m *Manager) downloadFavorite(ctx context.Context, videoID int64) error {
 	if err != nil {
 		return err
 	}
-	if c, err := m.db.GetCacheEntry(ctx, v.TGDocID); err == nil && c.Completed {
-		return nil
-	}
+
 	if err := os.MkdirAll(m.tmpDir(), 0o755); err != nil {
 		return err
 	}
 	tmp := filepath.Join(m.tmpDir(), fmt.Sprintf("%d.dl", v.TGDocID))
 	final := m.videoPath(v.TGDocID)
-	dl := downloader.NewDownloader().WithPartSize(512 * 1024)
-	loc := &tg.InputDocumentFileLocation{ID: v.TGDocID, AccessHash: v.AccessHash, FileReference: v.FileReference}
-	if _, err := dl.Download(cli.API, loc).ToPath(ctx, tmp); err != nil {
+
+	// Download straight from the document's DC via the pool (avoids per-request
+	// DC migration / IO timeouts under parallel load).
+	size, err := m.downloadParallel(ctx, cli.APIForDC(v.DCID), v, tmp)
+	if err != nil {
 		_ = os.Remove(tmp)
-		if tgerr.Is(err, "FILE_REFERENCE_EXPIRED") {
-			return fmt.Errorf("file_reference expired (will retry): %w", err)
-		}
 		return err
 	}
-	st, err := os.Stat(tmp)
-	if err != nil {
-		return err
+	// Integrity gate: a multi-threaded download that dropped bytes under a flaky
+	// link leaves a truncated file. It would still stream fine straight from
+	// Telegram (correct bytes), but served off disk the browser gets a corrupt
+	// stream and fails to decode (MEDIA_ERR DECODE). Telegram's Document.Size ==
+	// file_size, so an exact mismatch means the file is incomplete — discard it
+	// and let the next play re-stream from TG + re-enqueue the download.
+	if v.FileSize > 0 && size != v.FileSize {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("download size mismatch for doc %d: got %d, want %d", v.TGDocID, size, v.FileSize)
 	}
 	if err := os.Rename(tmp, final); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	rel, _ := filepath.Rel(m.cfg.CacheDir, final)
-	return m.db.UpsertCacheEntry(ctx, &db.CacheEntry{TGDocID: v.TGDocID, FilePath: rel, Bytes: st.Size(), Pinned: true, Completed: true})
+	if err := m.db.UpsertCacheEntry(ctx, &db.CacheEntry{
+		TGDocID:   v.TGDocID,
+		FilePath:  rel,
+		Bytes:     size,
+		Completed: true,
+	}); err != nil {
+		return err
+	}
+	slog.Info("cache stored", "doc_id", v.TGDocID, "bytes", size)
+	m.evictIfNeeded(ctx)
+	return nil
+}
+
+// downloadParallel runs the threaded download into tmp. On FILE_REFERENCE_EXPIRED
+// it refreshes the locator once and retries.
+func (m *Manager) downloadParallel(ctx context.Context, api *tg.Client, v *db.Video, tmp string) (int64, error) {
+	refreshed := false
+	for {
+		f, err := os.Create(tmp)
+		if err != nil {
+			return 0, err
+		}
+		loc := &tg.InputDocumentFileLocation{
+			ID:            v.TGDocID,
+			AccessHash:    v.AccessHash,
+			FileReference: v.FileReference,
+		}
+		threads := bestThreads(v.FileSize, cacheMaxThreads)
+		_, derr := downloader.NewDownloader().WithPartSize(cachePartSize).
+			Download(api, loc).WithThreads(threads).
+			Parallel(ctx, f)
+		cerr := f.Close()
+		if derr == nil && cerr == nil {
+			st, serr := os.Stat(tmp)
+			if serr != nil {
+				return 0, serr
+			}
+			return st.Size(), nil
+		}
+		if derr == nil {
+			derr = cerr
+		}
+		if !refreshed && tgerr.Is(derr, "FILE_REFERENCE_EXPIRED") && m.RefreshLocator != nil {
+			refreshed = true
+			if rerr := m.RefreshLocator(ctx, v); rerr != nil {
+				return 0, fmt.Errorf("refresh file_reference: %w", rerr)
+			}
+			continue
+		}
+		return 0, derr
+	}
 }
 
 func (m *Manager) lookupVideoForDownload(ctx context.Context, videoID int64) (*db.Video, error) {
-	row := m.db.QueryRow(ctx, `SELECT id, user_id, channel_id, tg_msg_id, COALESCE(tg_doc_id, 0), COALESCE(access_hash, 0), file_reference, COALESCE(mime_type, ''), COALESCE(file_size, 0) FROM videos WHERE id=$1`, videoID)
+	row := m.db.QueryRow(ctx, `
+        SELECT id, user_id, channel_id, tg_msg_id,
+               COALESCE(tg_doc_id, 0), COALESCE(access_hash, 0), file_reference,
+               COALESCE(mime_type, ''), COALESCE(file_size, 0), COALESCE(dc_id, 0)
+        FROM videos WHERE id=$1
+    `, videoID)
 	v := &db.Video{}
-	if err := row.Scan(&v.ID, &v.UserID, &v.ChannelID, &v.TGMsgID, &v.TGDocID, &v.AccessHash, &v.FileReference, &v.MimeType, &v.FileSize); err != nil {
+	if err := row.Scan(&v.ID, &v.UserID, &v.ChannelID, &v.TGMsgID,
+		&v.TGDocID, &v.AccessHash, &v.FileReference,
+		&v.MimeType, &v.FileSize, &v.DCID); err != nil {
 		return nil, err
 	}
 	return v, nil

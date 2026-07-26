@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
 	"github.com/gotd/contrib/bg"
 	"github.com/gotd/contrib/middleware/floodwait"
 	"github.com/gotd/td/bin"
@@ -17,8 +18,28 @@ import (
 
 	"github.com/hanfeilong/onlineplaytgvideo/internal/config"
 	"github.com/hanfeilong/onlineplaytgvideo/internal/db"
+	"github.com/hanfeilong/onlineplaytgvideo/internal/dcpool"
+	"github.com/hanfeilong/onlineplaytgvideo/internal/tgmw"
 	"github.com/hanfeilong/onlineplaytgvideo/internal/tgsession"
 )
+
+// poolConnsPerDC is the max connections the per-DC pool opens for one session's
+// file transfers — enough to feed the parallel downloader without flooding TG.
+const poolConnsPerDC = 8
+
+// recoveryMaxElapsed caps how long the recovery middleware keeps reconnecting
+// for a single RPC before giving up — long enough to ride out a DC migration /
+// brief network blip, short enough that a truly dead connection fails fast.
+const recoveryMaxElapsed = 90 * time.Second
+
+// recoveryBackoff builds a fresh exponential backoff for one RPC's recovery loop.
+func recoveryBackoff() backoff.BackOff {
+	b := backoff.NewExponentialBackOff()
+	b.Multiplier = 1.1
+	b.MaxInterval = 10 * time.Second
+	b.MaxElapsedTime = recoveryMaxElapsed
+	return b
+}
 
 // DCList returns the production DC list with any TG_DC_OVERRIDES applied. Each
 // override is prepended for its DC id so gotd dials the given (current) IP
@@ -85,6 +106,7 @@ type entry struct {
 	userID int64
 	client *telegram.Client
 	api    *tg.Client
+	pool   dcpool.Pool
 	stop   bg.StopFunc
 }
 
@@ -95,6 +117,18 @@ type Client struct {
 	SessionID int64
 	Telegram  *telegram.Client
 	API       *tg.Client
+
+	pool dcpool.Pool
+}
+
+// APIForDC returns a tg.Client whose file requests go straight to the document's
+// DC via the persistent pool, avoiding the per-call DC migration that causes IO
+// timeouts. dc<=0 (unknown locator) falls back to the default client.
+func (c *Client) APIForDC(dc int) *tg.Client {
+	if c.pool == nil {
+		return c.API
+	}
+	return c.pool.Client(dc)
 }
 
 // waiterClient adapts (*telegram.Client + *floodwait.Waiter) to bg.Client so
@@ -147,10 +181,16 @@ func (m *Manager) Start(ctx context.Context, userID, sessionID int64) error {
 
 	waiter := floodwait.NewWaiter().WithMaxRetries(5)
 
+	// Middleware order is outermost→innermost. recovery reconnects on
+	// connection-level failures (IO timeouts from DC migration); retry absorbs
+	// transient server errors; the waiter backs off on FLOOD_WAIT; rpcLogger
+	// observes the raw per-attempt result.
 	client := telegram.NewClient(m.cfg.TgAPIID, m.cfg.TgAPIHash, telegram.Options{
 		SessionStorage: storage,
 		DCList:         DCList(m.cfg),
 		Middlewares: []telegram.Middleware{
+			tgmw.NewRecovery(ctx, recoveryBackoff),
+			tgmw.NewRetry(5),
 			waiter,
 			rpcLogger{sessionID: sessionID},
 		},
@@ -169,11 +209,22 @@ func (m *Manager) Start(ctx context.Context, userID, sessionID int64) error {
 	}
 	cancel()
 
+	// Per-DC connection pool for file transfers. SimpleWaiter (inline backoff)
+	// instead of the bg waiter, since pool invokers run outside bg.Connect's
+	// Run loop. ctx (the Start ctx) drives connection teardown on shutdown.
+	pool := dcpool.NewPool(ctx, client, poolConnsPerDC,
+		tgmw.NewRecovery(ctx, recoveryBackoff),
+		tgmw.NewRetry(5),
+		floodwait.NewSimpleWaiter(),
+		rpcLogger{sessionID: sessionID},
+	)
+
 	m.mu.Lock()
 	m.clients[sessionID] = &entry{
 		userID: userID,
 		client: client,
 		api:    client.API(),
+		pool:   pool,
 		stop:   stop,
 	}
 	m.mu.Unlock()
@@ -190,7 +241,13 @@ func (m *Manager) Stop(sessionID int64) error {
 		delete(m.clients, sessionID)
 	}
 	m.mu.Unlock()
-	if !ok || e.stop == nil {
+	if !ok {
+		return nil
+	}
+	if e.pool != nil {
+		_ = e.pool.Close()
+	}
+	if e.stop == nil {
 		return nil
 	}
 	return e.stop()
@@ -204,7 +261,7 @@ func (m *Manager) ClientForSession(sessionID int64) (*Client, error) {
 	if !ok {
 		return nil, errors.New("no telegram client for session")
 	}
-	return &Client{UserID: e.userID, SessionID: sessionID, Telegram: e.client, API: e.api}, nil
+	return &Client{UserID: e.userID, SessionID: sessionID, Telegram: e.client, API: e.api, pool: e.pool}, nil
 }
 
 // ClientsForUser returns every running client owned by a user (for picking
@@ -218,7 +275,7 @@ func (m *Manager) ClientsForUser(userID int64) []*Client {
 		if e.userID == userID {
 			out = append(out, &Client{
 				UserID: e.userID, SessionID: sid,
-				Telegram: e.client, API: e.api,
+				Telegram: e.client, API: e.api, pool: e.pool,
 			})
 		}
 	}
@@ -230,6 +287,9 @@ func (m *Manager) Shutdown() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for sid, e := range m.clients {
+		if e.pool != nil {
+			_ = e.pool.Close()
+		}
 		if e.stop != nil {
 			if err := e.stop(); err != nil {
 				slog.Warn("stop client", "session_id", sid, "err", err)

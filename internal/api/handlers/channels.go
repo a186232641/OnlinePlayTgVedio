@@ -163,7 +163,10 @@ func (h *ChannelsHandlers) List(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]channelDTO, 0, len(chs))
 	for _, c := range chs {
-		if c.DialogKind == db.DialogKindForum || c.DialogKind == db.DialogKindTopic {
+		// Only broadcast channels and supergroups are browsable. Basic groups,
+		// private chats/bots, and raw forum/topic rows are hidden — even if older
+		// rows of those kinds still linger from before discovery was narrowed.
+		if c.DialogKind != db.DialogKindChannel && c.DialogKind != db.DialogKindMegagroup {
 			continue
 		}
 		out = append(out, channelToDTO(c))
@@ -275,6 +278,9 @@ func (h *ChannelsHandlers) ClearVideos(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, err)
 		return
 	}
+	// Re-arm the backfill: without this the channel keeps history_complete=TRUE
+	// and the next sync skips Phase B entirely, so the wiped history never returns.
+	_ = h.DB.ResetHistoryComplete(r.Context(), cid)
 	_ = h.DB.MarkChannelIndexed(r.Context(), cid)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": n})
 }
