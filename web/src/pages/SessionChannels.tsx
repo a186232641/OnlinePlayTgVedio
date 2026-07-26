@@ -3,6 +3,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 
 import { api, Channel } from "../api/client";
+import { ChevronLeftIcon, RefreshIcon, SearchIcon, TrashIcon, UploadIcon } from "../components/icons";
+import { AlertStrip, LoadingState, PageHeader, Toggle } from "../components/ui";
 
 interface ImportResp {
   ok: boolean;
@@ -92,46 +94,74 @@ export function SessionChannels() {
     ? list.filter((c) => c.title.toLowerCase().includes(filter.toLowerCase()))
     : list;
 
-  if (q.isLoading) return <div className="p-6 text-slate-400">加载中…</div>;
+  if (q.isLoading) return <LoadingState />;
 
   return (
-    <div className="max-w-4xl mx-auto p-6 space-y-4">
-      <div className="flex items-center gap-3">
-        <Link to="/tg/accounts" className="text-sm text-slate-400 hover:text-slate-200">← 返回</Link>
-        <h1 className="text-2xl font-semibold">导入频道视频</h1>
+    <div className="mx-auto w-full max-w-[1100px] space-y-5 p-4 md:p-6">
+      <Link
+        to="/tg/accounts"
+        className="inline-flex items-center gap-1 text-theme-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+      >
+        <ChevronLeftIcon className="size-4" />
+        返回 TG 账号
+      </Link>
+
+      <PageHeader title="导入频道视频" meta={`该账号下发现 ${list.length} 个频道`} />
+
+      <AlertStrip tone="info" title="两种入库方式">
+        <div className="space-y-1">
+          <div>
+            <span className="font-medium">TG 同步</span> — 后端用你的 TG session 直接拉消息历史(增量 +
+            回填,可中断续传),推荐。
+          </div>
+          <div>
+            <span className="font-medium">导入 JSON</span> — Telegram Desktop 选频道 → ⋯ → Export chat
+            history → JSON 格式 → 取消所有媒体勾选 → 导出,再把 result.json 上传到对应频道行。
+          </div>
+        </div>
+      </AlertStrip>
+
+      <div className="relative">
+        <SearchIcon className="pointer-events-none absolute left-3.5 top-1/2 size-5 -translate-y-1/2 text-gray-400" />
+        <input
+          className="field pl-11"
+          placeholder="按标题过滤…"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+        />
       </div>
 
-      <input
-        className="w-full px-3 py-1.5 bg-slate-800 rounded text-sm"
-        placeholder="按标题过滤…"
-        value={filter}
-        onChange={(e) => setFilter(e.target.value)}
-      />
+      <div className="card" >
+        <div className="hidden items-center gap-4 rounded-t-2xl border-b border-gray-200 bg-gray-50 px-5 py-3 text-theme-xs font-medium text-gray-500 lg:flex dark:border-gray-800 dark:bg-white/[0.02] dark:text-gray-400">
+          <span className="flex-1">频道</span>
+          <span className="w-24 text-right">视频数</span>
+          <span className="w-20 text-center">自动同步</span>
+          <span className="w-[280px] text-right">操作</span>
+        </div>
 
-      <div className="text-xs text-slate-500">
-        在 Telegram Desktop 选目标频道 → ⋯ → Export chat history → 选 JSON 格式 → 取消所有媒体勾选 → 导出。
-        然后把生成的 result.json 在对应频道行点"导入 JSON"上传即可。
-      </div>
-
-      <div className="space-y-1">
-        {visible.length === 0 && (
-          <div className="text-slate-400 py-12 text-center">暂无频道,试试在 TG 账号页"重新发现"。</div>
+        {visible.length === 0 ? (
+          <div className="px-5 py-12 text-center text-theme-sm text-gray-500 dark:text-gray-400">
+            {list.length === 0 ? "暂无频道,试试在 TG 账号页「重新发现」。" : "没有匹配的频道。"}
+          </div>
+        ) : (
+          <div className="divide-y divide-gray-200 dark:divide-gray-800">
+            {visible.map((c) => (
+              <ChannelRow
+                key={c.id}
+                c={c}
+                onImport={(file) => importJson.mutate({ cid: c.id, file })}
+                onClear={() => {
+                  if (confirm(`清空 ${c.title} 的所有视频(${c.video_count} 条)?\n\n收藏会一并删除。常用于"重置后重新导入"。`)) {
+                    clearChannel.mutate(c.id);
+                  }
+                }}
+                onSync={() => syncStart.mutate(c.id)}
+                importing={importJson.isPending && importJson.variables?.cid === c.id}
+                clearing={clearChannel.isPending && clearChannel.variables === c.id}
+              />
+            ))}
+          </div>
         )}
-        {visible.map((c) => (
-          <ChannelRow
-            key={c.id}
-            c={c}
-            onImport={(file) => importJson.mutate({ cid: c.id, file })}
-            onClear={() => {
-              if (confirm(`清空 ${c.title} 的所有视频(${c.video_count} 条)?\n\n收藏会一并删除。常用于"重置后重新导入"。`)) {
-                clearChannel.mutate(c.id);
-              }
-            }}
-            onSync={() => syncStart.mutate(c.id)}
-            importing={importJson.isPending && importJson.variables?.cid === c.id}
-            clearing={clearChannel.isPending && clearChannel.variables === c.id}
-          />
-        ))}
       </div>
     </div>
   );
@@ -155,6 +185,8 @@ function ChannelRow({
     refetchInterval: (q) => (q.state.data?.running ? 2000 : false),
   });
   const isSyncing = !!sync.data?.running;
+  const lastError = sync.data?.last_error;
+  const upToDate = !!lastError?.startsWith("已是最新");
 
   const autoSync = useMutation({
     mutationFn: (val: boolean) => api.patch(`/api/channels/${c.id}`, { auto_sync: val }),
@@ -162,56 +194,56 @@ function ChannelRow({
     onError: (e: Error) => alert(`切换自动同步失败: ${e.message}`),
   });
 
+  const busy = importing || clearing || isSyncing;
+
   return (
-    <div className="rounded bg-slate-900 border border-slate-800 flex items-center gap-3 px-4 py-2.5">
-      <div className="flex-1 min-w-0">
-        <div className="truncate">{c.title}</div>
-        {c.username && <div className="text-xs text-slate-500">@{c.username}</div>}
-        {isSyncing && (
-          <div className="text-xs text-amber-300 mt-0.5">
-            正在从 TG 同步: 已遍历 {sync.data?.walked ?? 0} · 写入 {sync.data?.imported ?? 0} · 跳过 {sync.data?.skipped ?? 0}
-            <span className="text-amber-300/60">(边抓边写,首次大频道可能需多轮,中断会自动续传)</span>
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-3 px-5 py-3.5">
+      <div className="min-w-[220px] flex-1">
+        <div className="truncate font-medium text-gray-800 dark:text-white/90">{c.title}</div>
+        {c.username && (
+          <div className="truncate text-theme-xs text-gray-500 dark:text-gray-400">
+            @{c.username}
           </div>
         )}
-        {!isSyncing && sync.data?.last_error && (
-          (() => {
-            const isUpToDate = sync.data.last_error.startsWith("已是最新");
-            return (
-              <div
-                className={"text-xs mt-0.5 truncate " + (isUpToDate ? "text-sky-400" : "text-red-400")}
-                title={sync.data.last_error}
-              >
-                {isUpToDate ? sync.data.last_error : `上次同步失败: ${sync.data.last_error}`}
-              </div>
-            );
-          })()
+
+        {isSyncing && (
+          <div className="mt-1 text-theme-xs text-warning-600 dark:text-warning-400">
+            正在从 TG 同步:已遍历 {sync.data?.walked ?? 0} · 写入 {sync.data?.imported ?? 0} · 跳过{" "}
+            {sync.data?.skipped ?? 0}
+            <span className="text-gray-400 dark:text-gray-500">
+              {" "}(边抓边写,首次大频道可能需多轮,中断会自动续传)
+            </span>
+          </div>
+        )}
+        {!isSyncing && lastError && (
+          <div
+            className={
+              "mt-1 truncate text-theme-xs " +
+              (upToDate
+                ? "text-blue-light-600 dark:text-blue-light-400"
+                : "text-error-600 dark:text-error-400")
+            }
+            title={lastError}
+          >
+            {upToDate ? lastError : `上次同步失败: ${lastError}`}
+          </div>
         )}
       </div>
-      <div className="text-xs text-slate-500 w-20 text-right">{c.video_count} 视频</div>
-      <label
-        className="flex items-center gap-1.5 text-xs text-slate-400 select-none shrink-0"
-        title="是否纳入后台定时自动同步(手动「TG 同步」不受此开关影响)"
-      >
-        自动
-        <button
-          type="button"
-          role="switch"
-          aria-checked={c.auto_sync}
+
+      <div className="w-24 text-right text-theme-sm tabular-nums text-gray-600 dark:text-gray-300">
+        {c.video_count.toLocaleString()}
+      </div>
+
+      <div className="flex w-20 justify-center">
+        <Toggle
+          size="sm"
+          checked={c.auto_sync}
           disabled={autoSync.isPending}
-          onClick={() => autoSync.mutate(!c.auto_sync)}
-          className={
-            "relative w-9 h-5 rounded-full transition-colors disabled:opacity-50 " +
-            (c.auto_sync ? "bg-emerald-600" : "bg-slate-700")
-          }
-        >
-          <span
-            className={
-              "absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform " +
-              (c.auto_sync ? "translate-x-4" : "")
-            }
-          />
-        </button>
-      </label>
+          onChange={(v) => autoSync.mutate(v)}
+          title="是否纳入后台定时自动同步(手动「TG 同步」不受此开关影响)"
+        />
+      </div>
+
       <input
         ref={fileInputRef}
         type="file"
@@ -223,26 +255,38 @@ function ChannelRow({
           e.target.value = "";
         }}
       />
-      <button
-        onClick={onSync}
-        disabled={importing || clearing || isSyncing}
-        className="px-3 py-1 text-xs bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 rounded"
-        title="后端用你的 TG session 直接拉这个频道的消息历史(增量,只取没见过的新消息)"
-      >{isSyncing ? "同步中…" : "TG 同步"}</button>
-      <button
-        onClick={() => fileInputRef.current?.click()}
-        disabled={importing || clearing || isSyncing}
-        className="px-3 py-1 text-xs bg-sky-800 hover:bg-sky-700 disabled:opacity-50 rounded"
-        title="上传 TG Desktop 导出的 result.json"
-      >{importing ? "上传中…" : "导入 JSON"}</button>
-      {c.video_count > 0 && (
+
+      <div className="flex w-full items-center justify-end gap-2 lg:w-[280px]">
         <button
-          onClick={onClear}
-          disabled={importing || clearing || isSyncing}
-          className="px-2 py-1 text-xs bg-slate-700 hover:bg-red-700 disabled:opacity-50 rounded"
-          title="清空该频道所有视频(用于重新导入)"
-        >{clearing ? "清空中…" : "清空"}</button>
-      )}
+          onClick={onSync}
+          disabled={busy}
+          className="btn btn-primary btn-sm"
+          title="后端用你的 TG session 直接拉这个频道的消息历史(增量,只取没见过的新消息)"
+        >
+          <RefreshIcon className="size-4" />
+          {isSyncing ? "同步中…" : "TG 同步"}
+        </button>
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          disabled={busy}
+          className="btn btn-outline btn-sm"
+          title="上传 TG Desktop 导出的 result.json"
+        >
+          <UploadIcon className="size-4" />
+          {importing ? "上传中…" : "导入 JSON"}
+        </button>
+        {c.video_count > 0 && (
+          <button
+            onClick={onClear}
+            disabled={busy}
+            className="btn btn-danger btn-sm"
+            title="清空该频道所有视频(用于重新导入)"
+          >
+            <TrashIcon className="size-4" />
+            {clearing ? "清空中…" : "清空"}
+          </button>
+        )}
+      </div>
     </div>
   );
 }

@@ -3,6 +3,16 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
 import { api, TgSession } from "../api/client";
+import { ChevronRightIcon, PencilIcon, RefreshIcon, TrashIcon } from "../components/icons";
+import { EmptyState, LoadingState, PageHeader } from "../components/ui";
+
+// Session status → badge tone. Status is data state, so it earns a semantic
+// colour; everything else on the row stays neutral.
+const STATUS_BADGE: Record<TgSession["status"], { cls: string; label: string }> = {
+  active: { cls: "badge-success", label: "已激活" },
+  pending: { cls: "badge-warning", label: "待验证" },
+  revoked: { cls: "badge-error", label: "已失效" },
+};
 
 export function TgAccounts() {
   const qc = useQueryClient();
@@ -31,36 +41,48 @@ export function TgAccounts() {
     onSettled: () => qc.invalidateQueries({ queryKey: ["sessions"] }),
   });
 
-  if (q.isLoading) return <div className="p-6 text-slate-400">加载中…</div>;
+  if (q.isLoading) return <LoadingState />;
   const list = q.data?.sessions ?? [];
 
   return (
-    <div className="max-w-3xl mx-auto p-6 space-y-4">
-      <div className="flex items-center gap-3">
-        <h1 className="text-2xl font-semibold">TG 账号管理</h1>
-        <div className="flex-1" />
-        <Link to="/tg/bind" className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 rounded text-sm">+ 添加账号</Link>
-      </div>
+    <div className="mx-auto w-full max-w-[900px] space-y-5 p-4 md:p-6">
+      <PageHeader
+        title="TG 账号管理"
+        meta={`已绑定 ${list.length} 个 Telegram 账号`}
+        actions={
+          <Link to="/tg/bind" className="btn btn-primary">
+            + 添加账号
+          </Link>
+        }
+      />
 
-      {list.length === 0 && (
-        <div className="text-slate-400">还没有绑定任何 TG 账号。</div>
+      {list.length === 0 ? (
+        <EmptyState
+          title="还没有绑定任何 TG 账号"
+          hint="绑定后会自动发现你已加入的频道与超级群,再对频道执行同步即可索引视频。"
+          action={
+            <Link to="/tg/bind" className="btn btn-primary">
+              绑定 TG 账号
+            </Link>
+          }
+        />
+      ) : (
+        <div className="flex flex-col gap-3">
+          {list.map((s) => (
+            <SessionCard
+              key={s.id}
+              s={s}
+              onRefresh={() => refresh.mutate(s.id)}
+              onRemove={() => {
+                if (confirm(`解绑 ${s.phone || s.id}? 已索引的视频和收藏会保留,但无法继续播放和增量索引。`)) {
+                  remove.mutate(s.id);
+                }
+              }}
+              onRename={(label) => rename.mutate({ id: s.id, label })}
+            />
+          ))}
+        </div>
       )}
-
-      <div className="space-y-2">
-        {list.map((s) => (
-          <SessionCard
-            key={s.id}
-            s={s}
-            onRefresh={() => refresh.mutate(s.id)}
-            onRemove={() => {
-              if (confirm(`解绑 ${s.phone || s.id}? 已索引的视频和收藏会保留,但无法继续播放和增量索引。`)) {
-                remove.mutate(s.id);
-              }
-            }}
-            onRename={(label) => rename.mutate({ id: s.id, label })}
-          />
-        ))}
-      </div>
     </div>
   );
 }
@@ -75,41 +97,75 @@ function SessionCard({
 }) {
   const [editing, setEditing] = useState(false);
   const [label, setLabel] = useState(s.label ?? "");
+  const status = STATUS_BADGE[s.status];
 
   return (
-    <div className="p-4 rounded bg-slate-900 border border-slate-800 flex items-center gap-4">
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
+    <div className="card flex flex-wrap items-center gap-x-4 gap-y-3 p-4">
+      <div className="min-w-[200px] flex-1">
+        <div className="flex flex-wrap items-center gap-2">
           {editing ? (
             <>
               <input
-                className="px-2 py-0.5 bg-slate-800 rounded text-sm"
+                className="field field-sm w-48"
                 value={label}
                 onChange={(e) => setLabel(e.target.value)}
                 autoFocus
               />
               <button
                 onClick={() => { onRename(label); setEditing(false); }}
-                className="text-xs text-emerald-400"
+                className="btn btn-primary btn-sm"
               >保存</button>
-              <button onClick={() => setEditing(false)} className="text-xs text-slate-400">取消</button>
+              <button onClick={() => setEditing(false)} className="btn btn-outline btn-sm">
+                取消
+              </button>
             </>
           ) : (
             <>
-              <div className="font-medium">{s.label || s.phone || `账号 #${s.id}`}</div>
-              <button onClick={() => setEditing(true)} className="text-xs text-slate-400 hover:text-slate-200">改名</button>
+              <span className="font-medium text-gray-800 dark:text-white/90">
+                {s.label || s.phone || `账号 #${s.id}`}
+              </span>
+              <button
+                onClick={() => setEditing(true)}
+                className="btn-icon btn-ghost size-7"
+                title="改名"
+                aria-label="改名"
+              >
+                <PencilIcon className="size-4" />
+              </button>
+              <span className={"badge " + status.cls}>{status.label}</span>
+              {s.discover_status === "running" && (
+                <span className="badge badge-warning">
+                  <span className="size-1.5 animate-pulse rounded-full bg-warning-500" />
+                  发现频道中…
+                </span>
+              )}
+              {s.discover_status === "failed" && (
+                <span className="badge badge-error" title={s.discover_error}>
+                  发现失败
+                </span>
+              )}
             </>
           )}
         </div>
-        <div className="text-xs text-slate-500 mt-0.5">
-          {s.phone} · 状态: {s.status}
-          {s.discover_status === "running" && <span className="ml-2 text-amber-300">发现频道中…</span>}
-          {s.discover_status === "failed" && <span className="ml-2 text-red-400" title={s.discover_error}>发现失败</span>}
-        </div>
+        {s.phone && (
+          <div className="mt-1 text-theme-xs text-gray-500 dark:text-gray-400">{s.phone}</div>
+        )}
       </div>
-      <Link to={`/tg/accounts/${s.id}/channels`} className="text-sm text-emerald-400 hover:text-emerald-300">选频道 →</Link>
-      <button onClick={onRefresh} className="text-sm text-slate-400 hover:text-slate-200">重新发现</button>
-      <button onClick={onRemove} className="text-sm text-red-400 hover:text-red-300">解绑</button>
+
+      <div className="ml-auto flex flex-wrap items-center gap-2">
+        <button onClick={onRefresh} className="btn btn-outline btn-sm" title="重新拉取该账号已加入的频道列表">
+          <RefreshIcon className="size-4" />
+          重新发现
+        </button>
+        <button onClick={onRemove} className="btn btn-danger btn-sm">
+          <TrashIcon className="size-4" />
+          解绑
+        </button>
+        <Link to={`/tg/accounts/${s.id}/channels`} className="btn btn-primary btn-sm">
+          选频道
+          <ChevronRightIcon className="size-4" />
+        </Link>
+      </div>
     </div>
   );
 }

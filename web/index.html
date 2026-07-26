@@ -3,9 +3,27 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f9fafb" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#101828" media="(prefers-color-scheme: dark)" />
     <title>TG Video</title>
+    <script>
+      // Apply the stored theme before first paint so the canvas never flashes
+      // the wrong polarity. Keep the storage key in sync with src/theme.ts.
+      (function () {
+        try {
+          var stored = localStorage.getItem("tgv-theme");
+          var dark =
+            stored === "dark" ||
+            (stored !== "light" &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.classList.toggle("dark", dark);
+        } catch (e) {
+          /* private mode / storage disabled — fall back to light */
+        }
+      })();
+    </script>
   </head>
-  <body class="bg-slate-950 text-slate-100">
+  <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

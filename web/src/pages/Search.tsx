@@ -5,6 +5,7 @@ import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { api, Channel, Video } from "../api/client";
 import { VideoGrid } from "../components/VideoGrid";
 import { SortSelect, SortValue, normalizeSort, DEFAULT_SORT } from "../components/SortSelect";
+import { EmptyState, LoadingState, MoreFooter, PageHeader } from "../components/ui";
 
 interface Page { videos: Video[] }
 
@@ -95,85 +96,95 @@ export function Search() {
     setSearchParams(paramsFromFilters({ ...submitted, order }));
 
   return (
-    <div>
+    <div className="space-y-5 p-4 md:p-6">
+      <PageHeader title="搜索" meta="文件名 / 正文 / 日期范围 / 频道,每个字段都是 ILIKE 模糊匹配" />
+
       <form
         onSubmit={(e) => { e.preventDefault(); setSearchParams(paramsFromFilters(draft)); }}
-        className="p-4 border-b border-slate-800 grid gap-2 sm:grid-cols-2 lg:grid-cols-5"
+        className="card grid gap-4 p-4 sm:grid-cols-2 lg:grid-cols-4"
       >
-        <input
-          className="px-3 py-2 bg-slate-800 rounded text-sm sm:col-span-2"
-          placeholder="文件名(file_name)…"
-          value={draft.fileName}
-          onChange={(e) => setDraft({ ...draft, fileName: e.target.value })}
-        />
-        <input
-          className="px-3 py-2 bg-slate-800 rounded text-sm sm:col-span-2"
-          placeholder="正文 / caption (text)…"
-          value={draft.text}
-          onChange={(e) => setDraft({ ...draft, text: e.target.value })}
-        />
-        <select
-          className="px-3 py-2 bg-slate-800 rounded text-sm"
-          value={draft.channelID}
-          onChange={(e) => setDraft({ ...draft, channelID: Number(e.target.value) })}
-        >
-          <option value={0}>全部频道</option>
-          {(channels.data?.channels ?? [])
-            .filter((c) => c.video_count > 0)
-            .map((c) => (
-              <option key={c.id} value={c.id}>{c.title}</option>
-            ))}
-        </select>
-        <label className="flex items-center gap-2 text-xs text-slate-400">
-          起始
+        <Field label="文件名 (file_name)" className="sm:col-span-2">
+          <input
+            className="field"
+            placeholder="例如 anchor-2024…"
+            value={draft.fileName}
+            onChange={(e) => setDraft({ ...draft, fileName: e.target.value })}
+          />
+        </Field>
+        <Field label="正文 / caption (text)" className="sm:col-span-2">
+          <input
+            className="field"
+            placeholder="消息正文关键词…"
+            value={draft.text}
+            onChange={(e) => setDraft({ ...draft, text: e.target.value })}
+          />
+        </Field>
+        <Field label="频道">
+          <select
+            className="field field-select"
+            value={draft.channelID}
+            onChange={(e) => setDraft({ ...draft, channelID: Number(e.target.value) })}
+          >
+            <option value={0}>全部频道</option>
+            {(channels.data?.channels ?? [])
+              .filter((c) => c.video_count > 0)
+              .map((c) => (
+                <option key={c.id} value={c.id}>{c.title}</option>
+              ))}
+          </select>
+        </Field>
+        <Field label="起始日期">
           <input
             type="date"
-            className="flex-1 px-2 py-1.5 bg-slate-800 rounded text-sm"
+            className="field"
             value={draft.dateFrom}
             onChange={(e) => setDraft({ ...draft, dateFrom: e.target.value })}
           />
-        </label>
-        <label className="flex items-center gap-2 text-xs text-slate-400">
-          结束
+        </Field>
+        <Field label="结束日期">
           <input
             type="date"
-            className="flex-1 px-2 py-1.5 bg-slate-800 rounded text-sm"
+            className="field"
             value={draft.dateTo}
             onChange={(e) => setDraft({ ...draft, dateTo: e.target.value })}
           />
-        </label>
-        <div className="sm:col-span-2 lg:col-span-1 flex gap-2">
-          <button className="flex-1 px-4 py-2 bg-emerald-700 hover:bg-emerald-600 rounded text-sm">搜索</button>
+        </Field>
+        <div className="flex items-end gap-2">
+          <button className="btn btn-primary flex-1">搜索</button>
           <button
             type="button"
             onClick={() => setSearchParams(new URLSearchParams())}
-            className="px-3 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm"
+            className="btn btn-outline"
           >清空</button>
         </div>
       </form>
 
       {!hasAny(submitted) && (
-        <div className="p-6 text-slate-400 text-sm">
-          支持任一组合: 文件名 / 正文 / 日期范围 / 频道。每个字段都是 ILIKE 模糊匹配。
-        </div>
+        <EmptyState
+          title="填入任一条件开始搜索"
+          hint="支持任意组合:文件名 / 正文 / 日期范围 / 频道。搜索条件会写进 URL,从视频返回时会原样恢复。"
+        />
       )}
 
-      {hasAny(submitted) && result.isLoading && (
-        <div className="p-6 text-slate-400">搜索中…</div>
-      )}
+      {hasAny(submitted) && result.isLoading && <LoadingState label="搜索中…" />}
 
       {hasAny(submitted) && result.data && (
         <>
-          <div className="px-6 pt-4 flex items-center gap-3 flex-wrap">
-            <span className="text-xs text-slate-500">命中 {all.length} 条</span>
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="text-theme-xs text-gray-500 dark:text-gray-400">
+              命中 <span className="font-medium text-gray-700 dark:text-gray-300">{all.length}</span> 条
+              {result.hasNextPage ? " (还有更多)" : ""}
+            </span>
             <SortSelect
               value={submitted.order}
               onChange={changeOrder}
-              className="ml-auto px-3 py-1.5 bg-slate-800 rounded text-sm"
+              className="field field-select field-sm ml-auto w-auto"
             />
           </div>
+
           <VideoGrid
             videos={all}
+            emptyLabel="无匹配结果"
             linkTo={(v) => {
               const p = new URLSearchParams();
               if (submitted.text) p.set("text", submitted.text);
@@ -185,23 +196,34 @@ export function Search() {
               return `/videos/${v.id}?${p}`;
             }}
           />
-          <div className="py-6 flex items-center justify-center">
-            {result.hasNextPage ? (
-              <button
-                onClick={() => result.fetchNextPage()}
-                disabled={result.isFetchingNextPage}
-                className="px-6 py-2 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 rounded text-sm"
-              >
-                {result.isFetchingNextPage ? "加载中…" : `加载下一页 (+${PAGE_SIZE})`}
-              </button>
-            ) : all.length > 0 ? (
-              <span className="text-xs text-slate-500">— 已加载全部 —</span>
-            ) : (
-              <span className="text-xs text-slate-500">无匹配结果</span>
-            )}
-          </div>
+
+          <MoreFooter
+            hasNextPage={!!result.hasNextPage}
+            isFetchingNextPage={result.isFetchingNextPage}
+            fetchNextPage={result.fetchNextPage}
+            doneLabel="已加载全部"
+            loaded={all.length}
+            pageSize={PAGE_SIZE}
+          />
         </>
       )}
     </div>
+  );
+}
+
+// Field pairs a 12px label with its control — the form language the design
+// specifies (label above, 44px control, hairline border).
+function Field({
+  label, className, children,
+}: {
+  label: string;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <label className={"flex flex-col gap-1.5 " + (className ?? "")}>
+      <span className="text-theme-xs font-medium text-gray-500 dark:text-gray-400">{label}</span>
+      {children}
+    </label>
   );
 }

@@ -1,6 +1,8 @@
 import { Link } from "react-router-dom";
 
 import { Video } from "../api/client";
+import { ClockIcon, PlayIcon } from "./icons";
+import { EmptyState } from "./ui";
 
 function fmtDuration(s: number) {
   if (!s) return "—";
@@ -36,30 +38,51 @@ function fmtDate(s?: string) {
 export function VideoGrid({
   videos,
   linkTo,
+  emptyLabel = "暂无视频",
 }: {
   videos: Video[];
   linkTo?: (v: Video) => string;
+  emptyLabel?: string;
 }) {
-  if (videos.length === 0) return <div className="p-6 text-slate-400">暂无视频</div>;
+  if (videos.length === 0) return <EmptyState title={emptyLabel} />;
   return (
-    <div className="p-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3 3xl:grid-cols-4">
       {videos.map((v) => (
         <Link
           key={v.id}
           to={linkTo ? linkTo(v) : `/videos/${v.id}`}
-          className="group p-3 rounded bg-slate-900 border border-slate-800 hover:border-emerald-700 flex flex-col gap-2 min-h-[110px]"
+          className="card group flex min-h-[124px] flex-col gap-2 p-4 transition-colors hover:border-brand-300 hover:bg-brand-25 dark:hover:border-brand-500/40 dark:hover:bg-brand-500/[0.06]"
         >
-          <div className="text-sm font-medium leading-snug line-clamp-2 break-all group-hover:text-emerald-300">
-            {v.file_name?.trim() || v.text?.trim() || <span className="text-slate-500">视频 #{v.id}</span>}
+          <div className="flex items-start gap-2.5">
+            <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-gray-100 text-gray-400 transition-colors group-hover:bg-brand-500 group-hover:text-white dark:bg-white/[0.06] dark:text-gray-500">
+              <PlayIcon className="size-3.5" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="line-clamp-2 break-all text-theme-sm font-medium leading-snug text-gray-800 transition-colors group-hover:text-brand-600 dark:text-white/90 dark:group-hover:text-brand-400">
+                {v.file_name?.trim() || v.text?.trim() || (
+                  <span className="text-gray-400">视频 #{v.id}</span>
+                )}
+              </div>
+              {v.file_name && v.text && (
+                <div className="mt-1 line-clamp-2 text-theme-xs text-gray-500 dark:text-gray-400">
+                  {v.text}
+                </div>
+              )}
+            </div>
           </div>
-          {v.file_name && v.text && (
-            <div className="text-xs text-slate-400 line-clamp-2">{v.text}</div>
-          )}
-          <div className="mt-auto flex items-center gap-2 text-xs text-slate-500 flex-wrap">
-            <span className="px-1.5 py-0.5 bg-slate-800 rounded">{fmtDuration(v.duration_seconds)}</span>
+
+          <div className="mt-auto flex flex-wrap items-center gap-x-3 gap-y-1 text-theme-xs text-gray-500 dark:text-gray-400">
+            <span className="inline-flex items-center gap-1 font-medium text-gray-600 dark:text-gray-300">
+              <ClockIcon className="size-3.5" />
+              {fmtDuration(v.duration_seconds)}
+            </span>
             {v.file_size > 0 && <span>{fmtSize(v.file_size)}</span>}
-            {v.width > 0 && <span>{v.width}×{v.height}</span>}
-            {v.date && <span className="ml-auto">{fmtDate(v.date)}</span>}
+            {v.width > 0 && (
+              <span>
+                {v.width}×{v.height}
+              </span>
+            )}
+            {v.date && <span className="ml-auto tabular-nums">{fmtDate(v.date)}</span>}
           </div>
         </Link>
       ))}

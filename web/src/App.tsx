@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import { api, Me } from "./api/client";
 import { Layout } from "./components/Layout";
+import { LoadingState } from "./components/ui";
 import { Login } from "./pages/Login";
 import { Register } from "./pages/Register";
 import { TgBind } from "./pages/TgBind";
@@ -26,7 +27,7 @@ function useMe() {
 
 function Private({ children }: { children: JSX.Element }) {
   const me = useMe();
-  if (me.isLoading) return <div className="p-8 text-slate-400">加载中…</div>;
+  if (me.isLoading) return <LoadingState />;
   if (!me.data) return <Navigate to="/login" replace />;
   return children;
 }

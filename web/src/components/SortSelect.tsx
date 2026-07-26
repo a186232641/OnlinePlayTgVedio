@@ -32,7 +32,7 @@ export function SortSelect({
 }) {
   return (
     <select
-      className={className ?? "px-3 py-2 bg-slate-800 rounded text-sm"}
+      className={className ?? "field field-select field-sm w-auto"}
       value={value}
       onChange={(e) => onChange(e.target.value as SortValue)}
       title="排序方式"

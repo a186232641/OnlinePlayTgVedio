@@ -5,6 +5,8 @@ import { useMemo, useState } from "react";
 import { api, Channel, Streamer, Video } from "../api/client";
 import { VideoGrid } from "../components/VideoGrid";
 import { SortSelect, SortValue, DEFAULT_SORT } from "../components/SortSelect";
+import { ChevronLeftIcon, SearchIcon } from "../components/icons";
+import { EmptyState, LoadingState, MoreFooter, PageHeader, Toggle } from "../components/ui";
 
 interface Page { videos: Video[]; total?: number }
 interface ChannelResp { channel: Channel }
@@ -38,32 +40,25 @@ export function ChannelDetail() {
   });
 
   return (
-    <div>
-      <div className="px-6 pt-4 pb-2 flex items-center gap-3 flex-wrap">
-        <h1 className="text-lg font-semibold truncate">{channel?.title ?? "频道"}</h1>
-        <span className="text-xs text-slate-500">{channel?.video_count ?? 0} 视频</span>
-        <label className="ml-auto flex items-center gap-2 text-sm text-slate-300 select-none">
-          <span>按主播分组</span>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={grouped}
+    <div className="space-y-5 p-4 md:p-6">
+      <PageHeader
+        title={channel?.title ?? "频道"}
+        meta={
+          <>
+            {(channel?.video_count ?? 0).toLocaleString()} 个视频
+            {channel?.username && ` · @${channel.username}`}
+          </>
+        }
+        actions={
+          <Toggle
+            label="按主播分组"
+            title="按文件名里的主播名把视频分组展示"
+            checked={grouped}
             disabled={!channel || toggleGroup.isPending}
-            onClick={() => toggleGroup.mutate(!grouped)}
-            className={
-              "relative w-10 h-6 rounded-full transition-colors disabled:opacity-50 " +
-              (grouped ? "bg-emerald-600" : "bg-slate-700")
-            }
-          >
-            <span
-              className={
-                "absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform " +
-                (grouped ? "translate-x-4" : "")
-              }
-            />
-          </button>
-        </label>
-      </div>
+            onChange={(v) => toggleGroup.mutate(v)}
+          />
+        }
+      />
 
       {!grouped && <UngroupedView id={id!} />}
       {grouped && selected === null && <StreamerList id={id!} onPick={setSelected} />}
@@ -103,43 +98,47 @@ function UngroupedView({ id }: { id: string }) {
   const total = q.data?.pages[0]?.total;
 
   return (
-    <>
+    <div className="space-y-5">
       <form
         onSubmit={(e) => { e.preventDefault(); setQuery(draft.trim()); }}
-        className="px-6 pb-2 flex gap-2 items-center"
+        className="card flex flex-wrap items-center gap-3 p-4"
       >
-        <input
-          className="flex-1 px-3 py-1.5 bg-slate-800 rounded text-sm"
-          placeholder="搜索 file_name 或正文 (text) — 留空回到全部"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-        />
-        <button className="px-4 py-1.5 bg-emerald-700 hover:bg-emerald-600 rounded text-sm">搜索</button>
+        <div className="relative min-w-[220px] flex-1">
+          <SearchIcon className="pointer-events-none absolute left-3.5 top-1/2 size-5 -translate-y-1/2 text-gray-400" />
+          <input
+            className="field pl-11"
+            placeholder="搜索 file_name 或正文 (text) — 留空回到全部"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+          />
+        </div>
+        <button className="btn btn-primary">搜索</button>
         {(draft || query) && (
           <button
             type="button"
             onClick={() => { setDraft(""); setQuery(""); }}
-            className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 rounded text-sm"
+            className="btn btn-outline"
           >清空</button>
         )}
-        <SortSelect value={order} onChange={setOrder} className="px-3 py-1.5 bg-slate-800 rounded text-sm" />
+        <SortSelect value={order} onChange={setOrder} className="field field-select w-auto" />
       </form>
 
-      <div className="px-6 text-xs text-slate-500">
+      <div className="text-theme-xs text-gray-500 dark:text-gray-400">
         {query ? (
-          <>"{query}" 命中 {all.length} 条{q.hasNextPage ? " (还有更多)" : ""}</>
+          <>“{query}” 命中 <span className="font-medium text-gray-700 dark:text-gray-300">{all.length}</span> 条{q.hasNextPage ? " (还有更多)" : ""}</>
         ) : total != null ? (
-          <>已加载 {all.length} / {total}</>
+          <>已加载 <span className="font-medium text-gray-700 dark:text-gray-300">{all.length}</span> / {total.toLocaleString()}</>
         ) : (
           <>已加载 {all.length} 条</>
         )}
       </div>
 
       {q.isLoading ? (
-        <div className="p-6 text-slate-400">加载中…</div>
+        <LoadingState />
       ) : (
         <VideoGrid
           videos={all}
+          emptyLabel={query ? "无匹配结果" : "暂无视频"}
           linkTo={(v) => {
             const params = new URLSearchParams();
             params.set("ch", String(id));
@@ -150,8 +149,15 @@ function UngroupedView({ id }: { id: string }) {
         />
       )}
 
-      <MoreFooter q={q} emptyLabel={query ? "无匹配结果" : "暂无视频"} doneLabel={query ? "已加载全部命中" : "已加载全部"} loaded={all.length} />
-    </>
+      <MoreFooter
+        hasNextPage={!!q.hasNextPage}
+        isFetchingNextPage={q.isFetchingNextPage}
+        fetchNextPage={q.fetchNextPage}
+        doneLabel={query ? "已加载全部命中" : "已加载全部"}
+        loaded={all.length}
+        pageSize={PAGE_SIZE}
+      />
+    </div>
   );
 }
 
@@ -167,35 +173,45 @@ function StreamerList({ id, onPick }: { id: string; onPick: (s: string) => void 
     ? list.filter((s) => (s.streamer || "其它").toLowerCase().includes(filter.toLowerCase()))
     : list;
 
-  if (q.isLoading) return <div className="p-6 text-slate-400">加载中…</div>;
-  if (list.length === 0) return <div className="p-6 text-slate-400">暂无视频</div>;
+  if (q.isLoading) return <LoadingState />;
+  if (list.length === 0) return <EmptyState title="暂无视频" />;
 
   return (
-    <>
-      <div className="px-6 pb-2 flex items-center gap-3">
-        <input
-          className="flex-1 px-3 py-1.5 bg-slate-800 rounded text-sm"
-          placeholder="过滤主播…"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-        />
-        <span className="text-xs text-slate-500">{list.length} 位主播</span>
+    <div className="space-y-5">
+      <div className="card flex flex-wrap items-center gap-3 p-4">
+        <div className="relative min-w-[220px] flex-1">
+          <SearchIcon className="pointer-events-none absolute left-3.5 top-1/2 size-5 -translate-y-1/2 text-gray-400" />
+          <input
+            className="field pl-11"
+            placeholder="过滤主播…"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+          />
+        </div>
+        <span className="badge badge-gray">{list.length} 位主播</span>
       </div>
-      <div className="px-6 pb-6 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3">
-        {visible.map((s) => (
-          <button
-            key={s.streamer || "__other__"}
-            onClick={() => onPick(s.streamer)}
-            className="p-4 rounded bg-slate-900 border border-slate-800 hover:border-emerald-700 text-left"
-          >
-            <div className="font-medium truncate">
-              {s.streamer || <span className="text-slate-400">其它 (未匹配)</span>}
-            </div>
-            <div className="text-xs text-slate-500 mt-1">{s.count} 视频</div>
-          </button>
-        ))}
-      </div>
-    </>
+
+      {visible.length === 0 ? (
+        <EmptyState title="没有匹配的主播" />
+      ) : (
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
+          {visible.map((s) => (
+            <button
+              key={s.streamer || "__other__"}
+              onClick={() => onPick(s.streamer)}
+              className="card group p-4 text-left transition-colors hover:border-brand-300 hover:bg-brand-25 dark:hover:border-brand-500/40 dark:hover:bg-brand-500/[0.06]"
+            >
+              <div className="truncate font-medium text-gray-800 transition-colors group-hover:text-brand-600 dark:text-white/90 dark:group-hover:text-brand-400">
+                {s.streamer || <span className="text-gray-400">其它 (未匹配)</span>}
+              </div>
+              <div className="mt-1 text-theme-xs text-gray-500 dark:text-gray-400">
+                {s.count.toLocaleString()} 视频
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -218,19 +234,25 @@ function StreamerVideos({ id, streamer, onBack }: { id: string; streamer: string
   const all = useMemo<Video[]>(() => q.data?.pages.flatMap((p) => p.videos) ?? [], [q.data]);
 
   return (
-    <>
-      <div className="px-6 pb-2 flex items-center gap-3">
-        <button onClick={onBack} className="text-sm text-emerald-400 hover:text-emerald-300">← 返回主播列表</button>
-        <span className="text-sm font-medium truncate">{streamer || "其它 (未匹配)"}</span>
-        <span className="text-xs text-slate-500">已加载 {all.length}</span>
-        <SortSelect value={order} onChange={setOrder} className="ml-auto px-3 py-1.5 bg-slate-800 rounded text-sm" />
+    <div className="space-y-5">
+      <div className="card flex flex-wrap items-center gap-3 p-4">
+        <button onClick={onBack} className="btn btn-outline btn-sm">
+          <ChevronLeftIcon className="size-4" />
+          返回主播列表
+        </button>
+        <span className="truncate font-medium text-gray-800 dark:text-white/90">
+          {streamer || "其它 (未匹配)"}
+        </span>
+        <span className="text-theme-xs text-gray-500 dark:text-gray-400">已加载 {all.length}</span>
+        <SortSelect value={order} onChange={setOrder} className="field field-select ml-auto w-auto" />
       </div>
 
       {q.isLoading ? (
-        <div className="p-6 text-slate-400">加载中…</div>
+        <LoadingState />
       ) : (
         <VideoGrid
           videos={all}
+          emptyLabel="该主播暂无视频"
           linkTo={(v) => {
             const params = new URLSearchParams();
             params.set("ch", String(id));
@@ -241,36 +263,14 @@ function StreamerVideos({ id, streamer, onBack }: { id: string; streamer: string
         />
       )}
 
-      <MoreFooter q={q} emptyLabel="该主播暂无视频" doneLabel="已加载全部" loaded={all.length} />
-    </>
-  );
-}
-
-// MoreFooter renders the shared "load more / done / empty" footer for an
-// infinite query.
-function MoreFooter({
-  q, emptyLabel, doneLabel, loaded,
-}: {
-  q: ReturnType<typeof useInfiniteQuery<Page>>;
-  emptyLabel: string;
-  doneLabel: string;
-  loaded: number;
-}) {
-  return (
-    <div className="py-6 flex items-center justify-center">
-      {q.hasNextPage ? (
-        <button
-          onClick={() => q.fetchNextPage()}
-          disabled={q.isFetchingNextPage}
-          className="px-6 py-2 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 rounded text-sm"
-        >
-          {q.isFetchingNextPage ? "加载中…" : `加载下一页 (+${PAGE_SIZE})`}
-        </button>
-      ) : loaded > 0 ? (
-        <span className="text-xs text-slate-500">— {doneLabel} {loaded} 条 —</span>
-      ) : !q.isLoading ? (
-        <span className="text-xs text-slate-500">{emptyLabel}</span>
-      ) : null}
+      <MoreFooter
+        hasNextPage={!!q.hasNextPage}
+        isFetchingNextPage={q.isFetchingNextPage}
+        fetchNextPage={q.fetchNextPage}
+        doneLabel="已加载全部"
+        loaded={all.length}
+        pageSize={PAGE_SIZE}
+      />
     </div>
   );
 }

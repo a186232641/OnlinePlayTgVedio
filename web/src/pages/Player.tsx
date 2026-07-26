@@ -4,6 +4,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import mpegts from "mpegts.js";
 
 import { api, Video } from "../api/client";
+import { ChevronLeftIcon, ChevronRightIcon, PlayIcon, StarIcon } from "../components/icons";
+import { LoadingState, Spinner, cx } from "../components/ui";
 
 interface VideoResp { video: Video; favorite: boolean }
 interface VideosResp { videos: Video[] }
@@ -83,7 +85,7 @@ export function Player() {
   const [containerHint, setContainerHint] = useState<string>("");
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const flvPlayerRef = useRef<mpegts.Player | null>(null);
-  const sidebarRef = useRef<HTMLElement | null>(null);
+  const sidebarRef = useRef<HTMLDivElement | null>(null);
 
   // Stable string of the search params; used both as react-query cache key
   // and as a dependency for the "scroll-into-view" effect.
@@ -96,23 +98,27 @@ export function Player() {
   }, [id]);
 
   // Position the highlighted item inside the sidebar — but only by setting
-  // aside.scrollTop directly, never via scrollIntoView (which can cascade up
-  // to ancestor scroll containers and yank the whole page to the top).
-  // Strategy: if the current item's bounding box is already inside the
-  // aside's visible window, do nothing. Otherwise center it.
+  // the scroller's scrollTop directly, never via scrollIntoView (which can
+  // cascade up to ancestor scroll containers and yank the whole page to the
+  // top). Strategy: if the current item's box is already inside the visible
+  // window, do nothing. Otherwise center it. Offsets are measured from the
+  // client rects so nested markup / positioned ancestors can't skew the math.
   useEffect(() => {
-    const aside = sidebarRef.current;
-    if (!aside || !id) return;
-    const el = aside.querySelector<HTMLElement>(`[data-video-id="${id}"]`);
+    const scroller = sidebarRef.current;
+    if (!scroller || !id) return;
+    const el = scroller.querySelector<HTMLElement>(`[data-video-id="${id}"]`);
     if (!el) return;
-    const top = el.offsetTop - aside.offsetTop;
+    const top =
+      el.getBoundingClientRect().top -
+      scroller.getBoundingClientRect().top +
+      scroller.scrollTop;
     const bottom = top + el.offsetHeight;
-    const viewTop = aside.scrollTop;
-    const viewBottom = viewTop + aside.clientHeight;
+    const viewTop = scroller.scrollTop;
+    const viewBottom = viewTop + scroller.clientHeight;
     if (top >= viewTop && bottom <= viewBottom) {
       return; // already visible — leave the user's scroll position alone
     }
-    aside.scrollTop = Math.max(0, top - aside.clientHeight / 2 + el.offsetHeight / 2);
+    scroller.scrollTop = Math.max(0, top - scroller.clientHeight / 2 + el.offsetHeight / 2);
   }, [id, playlistKey]);
 
   const meta = useQuery<VideoResp>({
@@ -281,147 +287,226 @@ export function Player() {
   const hasPlaylist = list.length > 0;
   const showLoading = meta.isLoading && !meta.data;
   const showNotFound = !meta.isLoading && !meta.data;
+  const isFav = !!meta.data?.favorite;
 
   return (
-    <div className="flex flex-col">
-      <div className="flex flex-col lg:flex-row">
-        {/* video area */}
-        <div className="lg:flex-1 bg-black flex items-center justify-center min-h-[40vh] relative">
-          {showLoading && <div className="text-slate-400">加载中…</div>}
-          {showNotFound && <div className="text-red-400 p-6">未找到视频</div>}
-          {v && (
-            <>
-              <video
-                key={v.id}
-                ref={videoRef}
-                controls
-                preload="metadata"
-                className="max-w-full max-h-[85vh] outline-none"
-                onEnded={() => {
-                  if (next) goToVideo(next.id);
-                }}
-                onError={async (e) => {
-                  const code = (e.currentTarget.error?.code ?? 0);
-                  setMediaErr(MEDIA_ERR_LABEL[code] ?? `未知(code=${code})`);
-                  try {
-                    const r = await fetch(v.stream_url, { credentials: "include" });
-                    const ct = r.headers.get("content-type") ?? "(none)";
-                    const cl = r.headers.get("content-length") ?? "(none)";
-                    const cr = r.headers.get("content-range") ?? "(none)";
-                    const ab = await r.arrayBuffer();
-                    const head = Array.from(new Uint8Array(ab.slice(0, 16)))
-                      .map((b) => b.toString(16).padStart(2, "0"))
-                      .join(" ");
-                    setStreamDiag(
-                      `HTTP ${r.status} ${r.statusText}\n` +
-                      `Content-Type: ${ct}\nContent-Length: ${cl}\nContent-Range: ${cr}\n` +
-                      `Body bytes: ${ab.byteLength}\nFirst 16 bytes (hex): ${head}`,
-                    );
-                  } catch (err: any) {
-                    setStreamDiag(`fetch failed: ${err.message ?? err}`);
-                  }
-                }}
-              />
-              {mediaErr && (
-                <div className="absolute inset-x-0 bottom-0 bg-red-950/90 text-red-200 text-xs p-3 space-y-1">
-                  <div className="font-medium">播放失败: {mediaErr}</div>
-                  {streamDiag && <pre className="text-[10px] whitespace-pre-wrap text-red-100/80">{streamDiag}</pre>}
-                  <div className="text-red-300/60">stream_url: {v.stream_url}</div>
-                </div>
+    <div className="p-4 md:p-6">
+      <div className={cx("grid gap-5", hasPlaylist && "xl:grid-cols-[minmax(0,1fr)_360px]")}>
+        <div className="min-w-0 space-y-5">
+          {/* video stage — media keeps its own near-black backdrop inside the
+              card frame; the chrome around it stays on the neutral canvas. */}
+          <div className="card overflow-hidden">
+            <div className="relative flex min-h-[40vh] items-center justify-center bg-gray-950">
+              {showLoading && <LoadingState />}
+              {showNotFound && (
+                <div className="p-6 text-theme-sm text-error-400">未找到视频</div>
               )}
-            </>
+              {v && (
+                <>
+                  <video
+                    key={v.id}
+                    ref={videoRef}
+                    controls
+                    preload="metadata"
+                    className="max-h-[78vh] max-w-full outline-none"
+                    onEnded={() => {
+                      if (next) goToVideo(next.id);
+                    }}
+                    onError={async (e) => {
+                      const code = (e.currentTarget.error?.code ?? 0);
+                      setMediaErr(MEDIA_ERR_LABEL[code] ?? `未知(code=${code})`);
+                      try {
+                        const r = await fetch(v.stream_url, { credentials: "include" });
+                        const ct = r.headers.get("content-type") ?? "(none)";
+                        const cl = r.headers.get("content-length") ?? "(none)";
+                        const cr = r.headers.get("content-range") ?? "(none)";
+                        const ab = await r.arrayBuffer();
+                        const head = Array.from(new Uint8Array(ab.slice(0, 16)))
+                          .map((b) => b.toString(16).padStart(2, "0"))
+                          .join(" ");
+                        setStreamDiag(
+                          `HTTP ${r.status} ${r.statusText}\n` +
+                          `Content-Type: ${ct}\nContent-Length: ${cl}\nContent-Range: ${cr}\n` +
+                          `Body bytes: ${ab.byteLength}\nFirst 16 bytes (hex): ${head}`,
+                        );
+                      } catch (err: any) {
+                        setStreamDiag(`fetch failed: ${err.message ?? err}`);
+                      }
+                    }}
+                  />
+                  {mediaErr && (
+                    <div className="absolute inset-x-0 bottom-0 space-y-1 border-l-4 border-error-500 bg-gray-900/95 p-3 text-theme-xs text-error-300 backdrop-blur">
+                      <div className="font-medium">播放失败: {mediaErr}</div>
+                      {streamDiag && (
+                        <pre className="whitespace-pre-wrap font-mono text-[11px] text-gray-400">
+                          {streamDiag}
+                        </pre>
+                      )}
+                      <div className="break-all text-gray-500">stream_url: {v.stream_url}</div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* metadata + controls */}
+          {v && meta.data && (
+            <div className="card space-y-4 p-5">
+              <div className="flex flex-wrap items-start gap-4">
+                <div className="min-w-[240px] flex-1 space-y-1.5">
+                  {v.file_name && (
+                    <div className="break-all font-medium text-gray-800 dark:text-white/90">
+                      {v.file_name}
+                    </div>
+                  )}
+                  <div className="whitespace-pre-wrap break-words text-theme-sm text-gray-600 dark:text-gray-300">
+                    {v.text?.trim() || <span className="text-gray-400">无说明</span>}
+                  </div>
+                </div>
+
+                <div className="flex shrink-0 flex-col gap-2">
+                  <button
+                    onClick={() => fav.mutate()}
+                    disabled={fav.isPending}
+                    className={cx(
+                      "btn",
+                      isFav
+                        ? "bg-brand-50 text-brand-500 ring-1 ring-inset ring-brand-200 hover:bg-brand-100 dark:bg-brand-500/[0.12] dark:text-brand-400 dark:ring-brand-500/30"
+                        : "btn-primary",
+                    )}
+                  >
+                    <StarIcon filled={isFav} className="size-4" />
+                    {isFav ? "已收藏" : "收藏"}
+                  </button>
+                  {hasPlaylist && (
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => prev && goToVideo(prev.id)}
+                        disabled={!prev}
+                        className="btn btn-outline btn-sm flex-1"
+                      >
+                        <ChevronLeftIcon className="size-4" />
+                        上一个
+                      </button>
+                      <button
+                        onClick={() => next && goToVideo(next.id)}
+                        disabled={!next}
+                        className="btn btn-outline btn-sm flex-1"
+                      >
+                        下一个
+                        <ChevronRightIcon className="size-4" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-gray-200 pt-3 text-theme-xs text-gray-500 dark:border-gray-800 dark:text-gray-400">
+                {v.width > 0 && <span>{v.width}×{v.height}</span>}
+                {v.file_size > 0 && <span>{(v.file_size / 1024 / 1024).toFixed(1)} MB</span>}
+                {v.mime_type && <span>{v.mime_type}</span>}
+                {v.date && <span className="tabular-nums">{v.date.slice(0, 19).replace("T", " ")}</span>}
+                {v.from && <span>from: {v.from}</span>}
+                {containerHint && <span className="badge badge-info">{containerHint}</span>}
+                <Link
+                  to="/"
+                  className="ml-auto inline-flex items-center gap-1 hover:text-gray-700 dark:hover:text-gray-200"
+                >
+                  <ChevronLeftIcon className="size-4" />
+                  返回频道
+                </Link>
+              </div>
+            </div>
           )}
         </div>
 
         {/* playlist sidebar */}
         {hasPlaylist && (
-          <aside ref={sidebarRef} className="lg:w-80 max-h-[85vh] overflow-y-auto bg-slate-900 border-l border-slate-800 shrink-0">
-            <div className="px-3 py-2 text-xs text-slate-400 border-b border-slate-800 sticky top-0 bg-slate-900 z-10">
-              播放列表 · {currentIdx + 1}/{list.length}
-              {playlist.hasNextPage ? <span className="text-slate-600"> (滚动加载更多)</span> : null}
+          <aside className="card flex max-h-[80vh] min-h-0 flex-col overflow-hidden xl:sticky xl:top-[84px]">
+            <div className="flex shrink-0 items-center gap-2 border-b border-gray-200 px-4 py-3 dark:border-gray-800">
+              <span className="text-theme-sm font-medium text-gray-800 dark:text-white/90">
+                播放列表
+              </span>
+              <span className="badge badge-gray tabular-nums">
+                {currentIdx + 1}/{list.length}
+              </span>
+              {playlist.hasNextPage && (
+                <span className="ml-auto text-theme-xs text-gray-400 dark:text-gray-500">
+                  滚动加载更多
+                </span>
+              )}
             </div>
-            {list.map((item, i) => {
-              const isCurrent = String(item.id) === id;
-              return (
-                <button
-                  key={item.id}
-                  data-video-id={item.id}
-                  onClick={() => goToVideo(item.id)}
-                  className={
-                    "w-full text-left px-3 py-2 border-b border-slate-800/50 flex gap-2 items-start " +
-                    (isCurrent ? "bg-emerald-900/40" : "hover:bg-slate-800")
-                  }
-                >
-                  <span className={"text-xs w-6 shrink-0 " + (isCurrent ? "text-emerald-300" : "text-slate-500")}>
-                    {isCurrent ? "▶" : i + 1}
-                  </span>
-                  <div className="flex-1 min-w-0">
-                    <div className={"text-xs leading-snug line-clamp-2 break-all " + (isCurrent ? "text-emerald-200" : "")}>
-                      {item.file_name?.trim() || item.text?.trim() || `视频 #${item.id}`}
+
+            <div ref={sidebarRef} className="custom-scrollbar min-h-0 flex-1 overflow-y-auto">
+              {list.map((item, i) => {
+                const isCurrent = String(item.id) === id;
+                return (
+                  <button
+                    key={item.id}
+                    data-video-id={item.id}
+                    onClick={() => goToVideo(item.id)}
+                    className={cx(
+                      "flex w-full items-start gap-2.5 border-b border-gray-100 px-4 py-2.5 text-left transition-colors dark:border-gray-800/60",
+                      isCurrent
+                        ? "bg-brand-50 dark:bg-brand-500/[0.12]"
+                        : "hover:bg-gray-50 dark:hover:bg-white/[0.04]",
+                    )}
+                  >
+                    <span
+                      className={cx(
+                        "mt-0.5 w-6 shrink-0 text-theme-xs tabular-nums",
+                        isCurrent
+                          ? "text-brand-500 dark:text-brand-400"
+                          : "text-gray-400 dark:text-gray-500",
+                      )}
+                    >
+                      {isCurrent ? <PlayIcon className="size-3" /> : i + 1}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div
+                        className={cx(
+                          "line-clamp-2 break-all text-theme-xs leading-snug",
+                          isCurrent
+                            ? "font-medium text-brand-600 dark:text-brand-400"
+                            : "text-gray-700 dark:text-gray-300",
+                        )}
+                      >
+                        {item.file_name?.trim() || item.text?.trim() || `视频 #${item.id}`}
+                      </div>
+                      <div className="mt-0.5 text-[11px] leading-4 text-gray-400 dark:text-gray-500">
+                        {item.duration_seconds > 0 && fmtDur(item.duration_seconds)}
+                        {item.date && " · " + item.date.slice(0, 10)}
+                      </div>
                     </div>
-                    <div className="text-[10px] text-slate-500 mt-0.5">
-                      {item.duration_seconds > 0 && fmtDur(item.duration_seconds)}
-                      {item.date && " · " + item.date.slice(0, 10)}
-                    </div>
-                  </div>
-                </button>
-              );
-            })}
-            <div ref={sentinelRef} className="py-3 text-center text-xs text-slate-500">
-              {playlist.isFetchingNextPage
-                ? "加载更多…"
-                : playlist.hasNextPage
-                ? <button onClick={() => playlist.fetchNextPage()} className="hover:text-slate-300">加载更多</button>
-                : list.length > 0
-                ? "— 已加载全部 —"
-                : null}
+                  </button>
+                );
+              })}
+
+              <div
+                ref={sentinelRef}
+                className="flex items-center justify-center gap-2 py-3 text-theme-xs text-gray-400 dark:text-gray-500"
+              >
+                {playlist.isFetchingNextPage ? (
+                  <>
+                    <Spinner className="size-3.5" />
+                    加载更多…
+                  </>
+                ) : playlist.hasNextPage ? (
+                  <button
+                    onClick={() => playlist.fetchNextPage()}
+                    className="hover:text-gray-600 dark:hover:text-gray-300"
+                  >
+                    加载更多
+                  </button>
+                ) : list.length > 0 ? (
+                  "— 已加载全部 —"
+                ) : null}
+              </div>
             </div>
           </aside>
         )}
       </div>
-
-      {/* metadata + controls */}
-      {v && meta.data && (
-        <div className="px-6 py-4 max-w-5xl mx-auto w-full space-y-3">
-          <div className="flex items-start gap-4">
-            <div className="flex-1 space-y-1 min-w-0">
-              {v.file_name && <div className="font-medium break-all">{v.file_name}</div>}
-              <div className="whitespace-pre-wrap break-words text-sm text-slate-300">
-                {v.text?.trim() || <span className="text-slate-500">无说明</span>}
-              </div>
-            </div>
-            <div className="flex flex-col gap-2 shrink-0">
-              <button onClick={() => fav.mutate()}
-                      className={"px-3 py-2 rounded text-sm " + (meta.data.favorite ? "bg-amber-600" : "bg-slate-800 hover:bg-slate-700")}>
-                {meta.data.favorite ? "★ 已收藏" : "☆ 收藏"}
-              </button>
-              {hasPlaylist && (
-                <div className="flex gap-1">
-                  <button
-                    onClick={() => prev && goToVideo(prev.id)}
-                    disabled={!prev}
-                    className="flex-1 px-2 py-1 text-xs bg-slate-800 hover:bg-slate-700 disabled:opacity-30 rounded"
-                  >上一个</button>
-                  <button
-                    onClick={() => next && goToVideo(next.id)}
-                    disabled={!next}
-                    className="flex-1 px-2 py-1 text-xs bg-slate-800 hover:bg-slate-700 disabled:opacity-30 rounded"
-                  >下一个</button>
-                </div>
-              )}
-            </div>
-          </div>
-          <div className="text-xs text-slate-500 flex flex-wrap gap-3">
-            {v.width > 0 && <span>{v.width}×{v.height}</span>}
-            {v.file_size > 0 && <span>{(v.file_size / 1024 / 1024).toFixed(1)} MB</span>}
-            {v.mime_type && <span>{v.mime_type}</span>}
-            {v.date && <span>{v.date.slice(0, 19).replace("T", " ")}</span>}
-            {v.from && <span>from: {v.from}</span>}
-            {containerHint && <span className="text-emerald-500">{containerHint}</span>}
-            <Link to="/" className="ml-auto text-slate-400 hover:text-slate-200">← 返回</Link>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
