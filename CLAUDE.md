@@ -20,9 +20,17 @@ go test ./internal/video/ -run TestParseRange   # run a single test
 ```
 The Makefile auto-`include`s `.env` and exports it, so `make run`/`make dev-server` see
 `TG_API_ID`, `MASTER_KEY`, `DB_DSN`, etc. Running the binary directly requires exporting those
-yourself. Tests are pure-unit only (no DB/network) and cover the fiddly math: `video/stream_test.go`
+yourself. `make test` is pure-unit (no DB/network) and covers the fiddly math: `video/stream_test.go`
 (Range parsing + chunk alignment), `db/videos_test.go` (keyset cursor + ORDER BY SQL),
 `cache/cache_test.go` (disk scan), `config/config_test.go` (`TG_DC_OVERRIDES` parsing).
+`db/integration_test.go` is the one exception and **skips itself unless `TEST_DB_DSN` is set**
+(it wipes every table, so point it at a throwaway database). It covers what unit tests can't:
+the merged video+image pagination walked at several page sizes, forum-topic rows, the
+`(kind, id)` cache keys, and favorites/pin bookkeeping across both tables:
+```bash
+createdb tgvtest
+TEST_DB_DSN='postgres:///tgvtest?sslmode=disable' go test ./internal/db/ -run TestIntegration
+```
 
 Frontend (Node 20+, in `web/`):
 ```bash

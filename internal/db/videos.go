@@ -110,7 +110,8 @@ func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
             thumbnail, thumbnail_file_size,
             media_type, mime_type,
             duration_seconds, width, height,
-            text, text_entities, grouped_id, dc_id, thumb_size
+            text, text_entities, grouped_id, dc_id, thumb_size,
+            tg_doc_id, access_hash, file_reference
         ) VALUES (
             $1,$2,
             $3,$4,$5,$6,
@@ -119,7 +120,8 @@ func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
             $12,$13,
             $14,$15,
             $16,$17,$18,
-            $19,$20,$21,$22,$23
+            $19,$20,$21,$22,$23,
+            $24,$25,$26
         )
         ON CONFLICT (user_id, channel_id, tg_msg_id) DO UPDATE SET
             msg_type            = EXCLUDED.msg_type,
@@ -145,7 +147,13 @@ func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
             -- Keep a known DC if a later re-import (e.g. JSON) carries 0.
             dc_id               = CASE WHEN EXCLUDED.dc_id > 0 THEN EXCLUDED.dc_id ELSE videos.dc_id END,
             -- Same for the thumb size: a JSON re-import has none, don't wipe it.
-            thumb_size          = COALESCE(EXCLUDED.thumb_size, videos.thumb_size)
+            thumb_size          = COALESCE(EXCLUDED.thumb_size, videos.thumb_size),
+            -- TG sync carries the streaming locator; the JSON importer does not
+            -- (it inserts 0/empty). Only overwrite when the incoming row actually
+            -- has one, so a re-import can't wipe what sync resolved.
+            tg_doc_id           = CASE WHEN EXCLUDED.tg_doc_id > 0 THEN EXCLUDED.tg_doc_id ELSE videos.tg_doc_id END,
+            access_hash         = CASE WHEN EXCLUDED.tg_doc_id > 0 THEN EXCLUDED.access_hash ELSE videos.access_hash END,
+            file_reference      = CASE WHEN EXCLUDED.tg_doc_id > 0 THEN EXCLUDED.file_reference ELSE videos.file_reference END
         RETURNING id
     `,
 		v.UserID, v.ChannelID,
@@ -157,6 +165,7 @@ func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
 		v.DurationSeconds, v.Width, v.Height,
 		nilIfEmpty(v.Text), v.TextEntities, nilIfZero64(v.GroupedID), v.DCID,
 		nilIfEmpty(v.ThumbSize),
+		v.TGDocID, v.AccessHash, v.FileReference,
 	)
 	var id int64
 	if err := row.Scan(&id); err != nil {
@@ -335,13 +344,14 @@ func keysetCursorOn(table, alias, orderBy, p string, hasDuration bool) string {
 		cmp = ">"
 	}
 	c := alias + "." + col
+	id := alias + ".id"
 	cur := "(SELECT " + col + " FROM " + table + " WHERE id = $" + p + ")"
 	// Boundary in the NULL tail ⇒ only later NULLs (by id, same direction).
 	// Otherwise: strictly past the boundary value, the tie broken by id, plus
 	// the whole NULL tail (which sorts after any non-NULL value).
 	return "CASE WHEN " + cur + " IS NULL " +
-		"THEN (" + c + " IS NULL AND v.id " + cmp + " $" + p + ") " +
-		"ELSE (" + c + " " + cmp + " " + cur + " OR (" + c + " = " + cur + " AND v.id " + cmp + " $" + p + ") OR " + c + " IS NULL) END"
+		"THEN (" + c + " IS NULL AND " + id + " " + cmp + " $" + p + ") " +
+		"ELSE (" + c + " " + cmp + " " + cur + " OR (" + c + " = " + cur + " AND " + id + " " + cmp + " $" + p + ") OR " + c + " IS NULL) END"
 }
 
 func (d *DB) ListVideos(ctx context.Context, opt ListVideosOpts) ([]Video, error) {

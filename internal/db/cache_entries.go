@@ -103,7 +103,10 @@ func (d *DB) PinByVideoID(ctx context.Context, videoID int64) (int64, bool, erro
 	var completed bool
 	if err := row.Scan(&docID, &completed); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			row2 := d.QueryRow(ctx, `SELECT tg_doc_id FROM videos WHERE id=$1`, videoID)
+			// COALESCE: a JSON-imported row that was never played has no
+			// locator yet, and favoriting it must not error — there is simply
+			// nothing to pin until the first play resolves it.
+			row2 := d.QueryRow(ctx, `SELECT COALESCE(tg_doc_id, 0) FROM videos WHERE id=$1`, videoID)
 			if err := row2.Scan(&docID); err != nil {
 				return 0, false, err
 			}
@@ -166,7 +169,7 @@ func (d *DB) DeleteCacheEntry(ctx context.Context, kind string, docID int64) err
 
 func (d *DB) LookupDocByVideoID(ctx context.Context, videoID int64) (int64, error) {
 	var doc int64
-	err := d.QueryRow(ctx, `SELECT tg_doc_id FROM videos WHERE id=$1`, videoID).Scan(&doc)
+	err := d.QueryRow(ctx, `SELECT COALESCE(tg_doc_id, 0) FROM videos WHERE id=$1`, videoID).Scan(&doc)
 	if err != nil && errors.Is(err, pgx.ErrNoRows) {
 		return 0, ErrNotFound
 	}

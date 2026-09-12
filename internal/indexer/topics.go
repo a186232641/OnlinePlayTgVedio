@@ -90,14 +90,14 @@ func (i *Indexer) discoverTopics(ctx context.Context, api *tg.Client, ch *db.Cha
 				offsetDate = d
 			}
 		}
-		// Guard against a server page that advances nothing (would loop forever).
+		// Only two things end the walk: an empty page, or a cursor that didn't
+		// advance (which would otherwise loop forever). A short page must NOT:
+		// getForumTopics explicitly lets the server return fewer topics than the
+		// limit, so treating that as "the end" silently truncates the topic list.
 		if lastTopic == offsetTopic {
 			break
 		}
 		offsetTopic = lastTopic
-		if len(resp.Topics) < topicPageSize {
-			break
-		}
 	}
 
 	if err := i.db.SetTopicsSynced(ctx, ch.ID); err != nil {

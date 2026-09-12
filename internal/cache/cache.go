@@ -241,7 +241,7 @@ func (m *Manager) EnqueueFavorite(userID, videoID int64) {
 		slog.Warn("pin cache for favorite", "video_id", videoID, "err", err)
 		return
 	}
-	if completed {
+	if completed || docID == 0 {
 		return
 	}
 	key := cacheKey{kind: db.MediaKindVideo, id: docID}
