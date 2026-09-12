@@ -2,8 +2,9 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-A self-hosted web app for browsing, searching, favoriting, and streaming videos from the
-Telegram channels a user has joined. Go backend (gotd/td MTProto client) + React SPA + Postgres.
+A self-hosted web app for browsing, searching, favoriting, and streaming the videos and images
+from the Telegram channels and groups a user has joined (including forum groups, whose media is
+browsed per topic). Go backend (gotd/td MTProto client) + React SPA + Postgres.
 The README.md is comprehensive (in Chinese) — read it for deployment and env-var detail. This
 file focuses on the things that require reading multiple files to understand.
 
@@ -69,17 +70,54 @@ is `MASTER_KEY` from env. Losing `MASTER_KEY` bricks every stored session → al
 `internal/tglogin/flow.go` via a channel-driven `UserAuthenticator` — the HTTP handlers feed
 phone/code/2FA-password into the in-flight gotd auth goroutine. SignUp is not supported.
 
-**Two ingest paths** populate the `videos` table, both producing the same row shape:
+**Forum groups and topics.** A forum supergroup keeps every message inside a *topic*, so the group
+itself is never browsed directly. Discovery marks it `channels.is_forum` (its `dialog_kind` stays
+`megagroup`, so every existing list filter keeps working) and `messages.getForumTopics` writes one
+child row per topic: `dialog_kind='topic'`, `parent_channel_id`, `topic_id` — columns migration
+0002 already created. **A topic row copies the parent's `tg_channel_id` and `access_hash`** on
+purpose: a topic is a message thread, not a peer, so every path that builds an `InputPeer` or
+re-fetches a message (`refresh.go`, the cache downloader) works on a topic row unchanged. Syncing a
+forum group (`runForumSync`) re-enumerates its topics and then syncs them **sequentially** — they
+share one TG session, and parallel history walks are the shortest path to a FLOOD_WAIT.
+
+**Photos live in their own table.** `photos` mirrors `videos` column for column (same TG-export
+naming, same lazily-resolved locator idea) but the locator is a *photo* locator
+(`tg.InputPhotoFileLocation`: photo id + access_hash + file_reference + a size letter), which is a
+different id space from documents — hence a separate table, a separate `photo_favorites`, and
+`kind` in `cache_entries`. `size_type`/`thumb_size` are the size letters picked at sync time from
+`Photo.Sizes` (`internal/tgmedia`); videos get the same treatment from `Document.Thumbs` into
+`videos.thumb_size`. Everything else — album caption propagation, keyset pagination, search,
+favorites — is the videos implementation repeated.
+
+**Merged media lists** (`internal/db/media.go`): a channel or topic view interleaves both tables by
+date. `ListMedia` queries each table for its own top-N after **its own** cursor, merges, and
+truncates back to N; the returned cursor points at the last row of each kind that made it into the
+page, so the next call re-reads whatever was fetched but not returned. The global top-N is always a
+subset of (top-N of videos ∪ top-N of photos), so this is exact — and it never compares ids across
+tables, which would be meaningless (two independent BIGSERIALs). The API carries the two halves as
+`offset_video` / `offset_photo` and answers with `has_more`: after a merge-and-truncate, a short
+page no longer means "the end", so the frontend must not infer it.
+
+**Sync cursors span both tables** (`MaxMsgIDForChannel` / `MinMsgIDForChannel`). A videos-only MAX
+would make every incremental sync re-walk everything newer than the last *video*. Widening what
+sync stores also means already-`history_complete` channels never see the older messages again —
+`POST /channels/{id}/backfill` resets that flag (for a forum group, on each of its topics) and
+re-runs sync. That is the migration path for images in channels synced before image support.
+
+**Two ingest paths** populate `videos`/`photos`, both producing the same row shape:
 - `internal/api/handlers/import.go` — upload a Telegram JSON export (`messages.json`).
-- `internal/indexer/sync.go` — pull live history via `messages.getHistory`. **Streaming +
-  resumable** (`walkHistory`): writes each batch to the DB as it pages, so a crash/timeout leaves
+- `internal/indexer/sync.go` — pull live history via `messages.getHistory`, or, for a topic, via
+  `messages.search` with `top_msg_id` (`fetcherFor` picks; the filter is deliberately
+  `InputMessagesFilterEmpty`, not `PhotoVideo`, because plenty of channels post videos as plain
+  documents that the server-side filter would drop). **Streaming + resumable** (`walkHistory`):
+  writes each batch to the DB as it pages, so a crash/timeout leaves
   partial progress instead of losing everything. Two passes, both driven by the stored cursor so a
   resume needs no extra bookkeeping: **Phase A incremental** = `MinID=MAX(tg_msg_id)` pulls messages
   newer than what we have; **Phase B backfill** = `OffsetID=MIN(tg_msg_id)` walks older history to
   the very bottom, then sets `channels.history_complete` so later sweeps skip the backfill. Write
   order doesn't matter — queries sort by `date`. A probe call first flags "stale access_hash / lost
   membership" (0 messages). Sync state is **in-memory only** (`Indexer.syncs` map), surfaced via
-  `GET /channels/{id}/sync` with live `walked`/`imported`/`skipped`. A background scheduler
+  `GET /channels/{id}/sync` with live `walked`/`imported`/`videos`/`photos`/`skipped`. A background scheduler
   (`indexer/scheduler.go`, started in `main.go`) re-runs sync every `SYNC_INTERVAL` (env, default
   30m; 0/off disables) for every channel that is `last_indexed_at IS NOT NULL AND auto_sync`
   (per-channel opt-in, default off; manual `SyncStart` ignores it), via the same idempotent
@@ -104,6 +142,15 @@ lazily re-fetches via `channels.getMessages` (`refresh.go`), updates the DB, and
 CDN-redirected files are **not** supported (returns 500). Each Telegram-served play also fires
 `Cache.EnsureCached` so the next play/seek hits the disk fast path.
 
+**Images and thumbnails are served by `internal/media`**, not the Range-streaming path: an image is
+small enough that the handler just makes sure the file is on disk (downloading it inline the first
+time, into `<CACHE_DIR>/photos/<photo_id>.bin`) and hands it to `http.ServeFile`. Thumbnails work
+the same way but land in `<CACHE_DIR>/thumbs/<kind>_<row id>.jpg` and are fetched **lazily on first
+request**, so only what someone actually scrolls past costs an RPC. Concurrent requests for the
+same file are serialised by an in-process mutex map — a media grid asks for dozens of thumbs at
+once. Thumbs are not LRU-managed (tiny, and re-fetching per scroll would be worse) but their bytes
+count against the cap.
+
 **Caching** (`internal/cache/cache.go`): **edge cache** — *every played* video is enqueued for a
 background full-file download (tdl-style multi-threaded; thread count scales with file size,
 `bestThreads`) to `<CACHE_DIR>/videos/<doc_id>.bin`, unpinned so the LRU can evict it. **Favoriting**
@@ -111,8 +158,12 @@ enqueues the same download but **pinned** so it survives normal GC. Downloads de
 (one copy on disk no matter how many users), write to a `tmp/` file then atomically promote.
 `cache_entries` table tracks state; `cleanPartials` clears stale temp files on startup.
 
+`cache_entries` is keyed by `(kind, tg_doc_id)` — `tg_doc_id` holds a document id for videos and a
+photo id for images, two id spaces that could collide.
+
 `evictIfNeeded` (every ~5 min) treats **the disk, not the DB, as the source of truth** for usage:
-`scanVideoFiles` sums the actual `.bin` files, then reconciles both directions — files with no
+`scanCacheFiles` sums the actual `.bin` files under both `videos/` and `photos/`, then reconciles
+both directions — files with no
 `cache_entries` row are deleted as orphans, rows with no file are deleted as stale. Eviction is LRU
 with unpinned first, but `CACHE_CAP_GB` (env, default **50**) is a hard ceiling: if pinned favorites
 alone exceed it, least-recently-used **pinned** files get reclaimed too. Don't "fix" that back into
@@ -124,7 +175,8 @@ embedded SQL (`migrations/*.sql`, `//go:embed`) applied in lexical order at star
 not edit applied migrations. Full-text search is a Postgres `tsvector` (simple config) on
 `videos.caption`, maintained by a trigger.
 
-**Keyset pagination** (`orderClause` / `keysetCursor` in `internal/db/videos.go`): every list is
+**Keyset pagination** (`orderClauseOn` / `keysetCursorOn` in `internal/db/videos.go`, shared with
+`photos` via the table/alias parameters): every list is
 `ORDER BY <col> <dir> NULLS LAST, id <dir>` and paged by a single `offset_id` query param — the
 boundary row's sort key is looked up server-side by id, so the API/frontend never carry a compound
 cursor. A plain `id < $n` cursor is **wrong** for the default date ordering: `id` is BIGSERIAL
@@ -132,13 +184,23 @@ cursor. A plain `id < $n` cursor is **wrong** for the default date ordering: `id
 order and pages come up short, silently stopping pagination early. Sort keys: `date_desc` (default),
 `date_asc`, `name_asc`, `name_desc`, `duration` (the last keeps the legacy plain-id cursor).
 
-**API** (`internal/api/router.go`): chi router. All `/api/*` except `/auth/{register,login,logout}`
+**API** (`internal/api/router.go`): chi router. The media-facing routes are
+`GET /channels/{id}/media` (merged list, `?kind=video|photo`), `GET /channels/{id}/topics` +
+`POST /channels/{id}/topics/refresh`, `POST /channels/{id}/backfill`, `GET /media/search`,
+`GET /photos/{id}` + `/file` + `/thumb`, `GET /videos/{id}/thumb`, and favorites that take either
+`{"video_id":n}` (legacy) or `{"kind":"photo","id":n}` with `DELETE /favorites/photo/{id}`.
+`GET /channels/{id}/videos` and `/videos/search` stay as the videos-only shape. All `/api/*` except `/auth/{register,login,logout}`
 require a JWT via `web.RequireUser` middleware. Web auth uses argon2id (`internal/auth/web/`).
 
 **Frontend** (`web/src/`): Vite + React + TypeScript + Tailwind v3 SPA. `api/client.ts` is the single
-fetch wrapper; pages under `pages/` map to routes. Lists use TanStack Query `useInfiniteQuery` with
-the `offset_id` keyset cursor above. `Player.tsx` picks a playback path per container — native
-`<video>` by default, `mpegts.js` for FLV/MPEG-TS.
+fetch wrapper; pages under `pages/` map to routes. Media lists go through `api/media.ts`
+(`useMediaPages` — the two-cursor infinite query; "is there more" comes from the server's
+`has_more`, never from a short page) and render via `components/MediaGrid.tsx` +
+`MediaBrowser.tsx`; clicking an image opens `Lightbox.tsx` in place rather than navigating, and
+←/→ there walk only the images of the current list. A topic IS a channel row, so `/channels/:id`
+renders both — `ChannelDetail` shows the topic list when `is_forum`, the media grid otherwise.
+`Player.tsx` picks a playback path per container — native `<video>` by default, `mpegts.js` for
+FLV/MPEG-TS — and builds its playlist from the same media endpoints with `kind=video`.
 
 **Frontend design system** — the UI implements the "Overseas Channel Workbench" language documented
 in `DESIGN-overseas-channel-workbench.md` at the repo root. Read that doc before any visual change.

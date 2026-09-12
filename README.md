@@ -1,6 +1,7 @@
 # OnlinePlayTgVedio
 
-自部署 Web 应用,用于浏览、搜索、收藏、在线播放你已加入的 Telegram 频道里的视频。
+自部署 Web 应用,用于浏览、搜索、收藏、在线播放你已加入的 Telegram 频道/群组里的视频和图片。
+论坛群组(带话题的超级群)按话题下钻浏览。
 
 底层基于 [gotd/td](https://github.com/gotd/td)(Go MTProto 客户端)。
 
@@ -8,10 +9,12 @@
 
 - 多用户注册系统(每个 Web 账号绑定自己的 TG 账号)
 - Web UI 完成 TG 登录(手机号 → 验证码 → 二次验证密码)
-- 自动索引你已加入的所有频道(包括超级群组)的视频消息,提取标题、时长、缩略图
-- React SPA 浏览频道、视频网格、跨频道搜索(Postgres FTS)
+- 自动索引你已加入的所有频道(包括超级群组)的视频和图片消息,提取标题、时长、尺寸
+- 论坛群组自动枚举话题,每个话题单独同步、单独浏览
+- React SPA 浏览频道/话题、缩略图网格(视频+图片混排,可按类型筛选)、跨频道搜索
+- 图片全屏查看器:←/→ 翻页、Esc 关闭、可收藏
 - HTML5 `<video>` 通过 HTTP Range 流式播放,服务端按 4KB 对齐切块从 TG `upload.getFile` 拉取
-- 收藏自动后台落盘缓存,非收藏视频按 LRU 淘汰
+- 收藏自动后台落盘缓存(视频和图片都算),非收藏按 LRU 淘汰
 - `file_reference` 过期自动 lazy refresh
 
 ## 快速开始(本地开发)
@@ -83,7 +86,10 @@ docker compose -f deploy/docker-compose.yml --env-file .env up -d --build
 | TG 登录交互 | 三步 HTTP API + channel-driven `UserAuthenticator`:`/api/tg/login/{start,code,password}` |
 | 会话加密 | TG session blob 用 AES-256-GCM 加密落 Postgres,密钥来自 env `MASTER_KEY` |
 | Range 流式 | 浏览器 `Range: bytes=…` → 后端 4KB 对齐 + `tg.Client.UploadGetFile(Precise=true)` 1MiB 块循环;首块跳过对齐前缀字节,末块裁剪超出 |
-| 缓存 | `cache_entries` 表 + 磁盘 `<CACHE_DIR>/videos/<doc_id>.bin`;收藏 = 后台 worker 整文件下载并 pin;LRU GC 每 5 分钟运行 |
+| 缓存 | `cache_entries` 表(主键 `(kind, id)`)+ 磁盘 `<CACHE_DIR>/videos/<doc_id>.bin`、`photos/<photo_id>.bin`、`thumbs/<kind>_<id>.jpg`;收藏 = 后台 worker 整文件下载并 pin;LRU GC 每 5 分钟运行,以磁盘实际占用为准 |
+| 话题 | 论坛群组打 `is_forum` 标记,`messages.getForumTopics` 写入 `dialog_kind='topic'` 子行(复制父群 access_hash);话题历史走 `messages.search` + `top_msg_id` |
+| 图片 | 独立 `photos` 表(locator 是 `InputPhotoFileLocation`,与 document 不同 id 空间);列表按"每表一个 keyset 游标 + 服务端归并"与视频混排 |
+| 缩略图 | 同步时记录可用尺寸 type,首次请求时按需从 TG 下载落盘 |
 | `file_reference` 刷新 | 流式中遇到 `FILE_REFERENCE_EXPIRED` → `channels.getMessages` 重取 → 更新 DB → 重试一次 |
 | FTS | Postgres `tsvector` (simple 配置) on `videos.caption`;trigger 自动维护 |
 
@@ -112,8 +118,10 @@ internal/
   tgsession/                AES-GCM 加密的 gotd session.Storage 实现
   tgmanager/                每用户一个 *telegram.Client 生命周期
   tglogin/                  三步登录 channel 编排
-  indexer/                  全量频道+视频扫描,缩略图下载
+  indexer/                  频道/话题发现 + 消息历史同步(视频与图片)
+  tgmedia/                  Photo.Sizes / Document.Thumbs 的尺寸挑选
   video/                    Range stream 代理 + file_reference 刷新
+  media/                    图片原图与缩略图的按需下载和分发
   cache/                    favorites 后台下载 + LRU 淘汰
   api/                      chi router + handlers
 web/                        Vite + React + TS + Tailwind SPA
@@ -139,6 +147,8 @@ make compose-up  # docker compose up
 - **缓存 dedup 按 `tg_doc_id`**(全局唯一)。同一公开频道里被多个用户收藏的同一视频只占一份磁盘空间。
 - **不支持 CDN 文件**(`UploadFileCDNRedirect`)。极少数大文件可能走 CDN,这种情况下会返回 500;后续如有需要再增量支持 `getCdnFile` 流。
 - **不支持 SignUp 流程**。已注册的 TG 账号可绑定;新号请先用官方客户端创建。
+- **老频道要补图片需手动回填**。在 TG 账号管理页点「重新回填」——已同步完历史的频道
+  (`history_complete=TRUE`)默认只拉新消息,不会自己回头把旧图片补上。
 
 ## License
 
