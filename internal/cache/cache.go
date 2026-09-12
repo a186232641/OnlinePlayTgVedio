@@ -28,6 +28,15 @@ const (
 	cachePartSize = 1024 * 1024 // 1 MiB
 	// cacheMaxThreads caps the parallel connections used per file download.
 	cacheMaxThreads = 8
+	// thumbCapNumer/thumbCapDenom carve a slice of CACHE_CAP_GB out for grid
+	// thumbnails. They are tiny individually but unbounded in count — an
+	// 800k-image channel browsed end to end would otherwise let them crowd out
+	// every video on disk, and since eviction can't reclaim them the manager
+	// would just keep logging "above cap" forever.
+	thumbCapNumer = 1
+	thumbCapDenom = 10
+	// thumbCapFloor keeps the budget usable on a tiny configured cap.
+	thumbCapFloor = 1 << 30 // 1 GiB
 )
 
 // threadLevels scales the download thread count by file size (mirrors tdl's
@@ -93,6 +102,17 @@ type diskFile struct {
 	Key   cacheKey
 	Path  string
 	Bytes int64
+}
+
+// thumbFile is one file in the thumbnail directory. Thumbnails are not tracked
+// in cache_entries (they are re-fetchable on demand and the serving path finds
+// them by deterministic name), so the GC works off the filesystem alone.
+type thumbFile struct {
+	Path    string
+	Kind    string // "video" | "photo"
+	RowID   int64
+	Bytes   int64
+	ModTime time.Time
 }
 
 func New(cfg *config.Config, database *db.DB, mgr *tgmanager.Manager) *Manager {
@@ -627,10 +647,10 @@ func (m *Manager) evictIfNeeded(ctx context.Context) {
 		slog.Warn("scan cache directory", "err", err)
 		return
 	}
-	// Thumbnails are not LRU-managed (they are tiny and re-fetching one on every
-	// grid scroll would be worse than keeping it), but they do occupy the same
-	// disk, so their bytes count against the cap.
-	thumbBytes := dirBytes(m.ThumbDir())
+	// Thumbnails get their own budget, reclaimed oldest-first, before the media
+	// files are considered. They share the disk with the media cache, so their
+	// bytes count against the same cap.
+	thumbBytes := m.evictThumbs(ctx, thumbCap(cap))
 	entries, err := m.db.AllCompletedCacheEntries(ctx)
 	if err != nil {
 		slog.Warn("load cache inventory", "err", err)
@@ -776,22 +796,92 @@ func scanCacheDir(kind, dir string) ([]diskFile, int64, error) {
 	return files, total, nil
 }
 
-// dirBytes sums the regular files directly inside dir (non-recursive). Missing
-// directory = 0 bytes.
-func dirBytes(dir string) int64 {
+// thumbCap is the slice of the overall cap that thumbnails may occupy.
+func thumbCap(total int64) int64 {
+	c := total * thumbCapNumer / thumbCapDenom
+	if c < thumbCapFloor {
+		c = thumbCapFloor
+	}
+	if c > total {
+		c = total
+	}
+	return c
+}
+
+// scanThumbFiles lists the thumbnail directory. Names are "<kind>_<row id>.jpg"
+// (written by internal/media); anything else is left alone rather than deleted,
+// so an unrelated file dropped in the directory can't be destroyed by the GC.
+func scanThumbFiles(dir string) ([]thumbFile, int64) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return 0
+		return nil, 0
 	}
+	out := make([]thumbFile, 0, len(entries))
 	var total int64
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jpg") {
 			continue
 		}
-		if info, err := e.Info(); err == nil && info.Mode().IsRegular() {
-			total += info.Size()
+		name := strings.TrimSuffix(e.Name(), ".jpg")
+		kind, idStr, ok := strings.Cut(name, "_")
+		if !ok || (kind != db.MediaKindVideo && kind != db.MediaKindPhoto) {
+			continue
+		}
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil || id <= 0 {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		out = append(out, thumbFile{
+			Path: filepath.Join(dir, e.Name()), Kind: kind, RowID: id,
+			Bytes: info.Size(), ModTime: info.ModTime(),
+		})
+		total += info.Size()
+	}
+	return out, total
+}
+
+// evictThumbs trims the thumbnail directory to its budget, oldest file first,
+// and returns the bytes left on disk.
+//
+// "Oldest" is fetch time (mtime), not last use: serving a file doesn't touch
+// its mtime, and chasing atime is unreliable across filesystems. For thumbnails
+// that approximation is fine — the cost of getting it wrong is one re-download
+// of a 20 KB file the next time someone scrolls past it.
+func (m *Manager) evictThumbs(ctx context.Context, cap int64) int64 {
+	files, total := scanThumbFiles(m.ThumbDir())
+	if total <= cap {
+		return total
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].ModTime.Before(files[j].ModTime) })
+
+	var videoIDs, photoIDs []int64
+	var freed int64
+	for _, f := range files {
+		if total <= cap {
+			break
+		}
+		if err := os.Remove(f.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("evict thumbnail", "path", f.Path, "err", err)
+			continue
+		}
+		total -= f.Bytes
+		freed += f.Bytes
+		if f.Kind == db.MediaKindPhoto {
+			photoIDs = append(photoIDs, f.RowID)
+		} else {
+			videoIDs = append(videoIDs, f.RowID)
 		}
 	}
+	if err := m.db.ClearThumbPaths(ctx, videoIDs, photoIDs); err != nil {
+		slog.Warn("clear evicted thumb paths", "err", err)
+	}
+	slog.Info("thumbnail cache trimmed",
+		"evicted_files", len(videoIDs)+len(photoIDs), "evicted_bytes", freed,
+		"disk_bytes", total, "cap_bytes", cap)
 	return total
 }
 

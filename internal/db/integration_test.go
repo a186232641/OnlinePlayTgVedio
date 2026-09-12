@@ -364,6 +364,73 @@ func TestIntegration(t *testing.T) {
 		t.Fatalf("photo album caption not propagated: %q", silent)
 	}
 
+	// --- batched page writes -----------------------------------------------
+	// The sync hot path writes a whole page per round trip; it must produce
+	// exactly the same rows as the single-row writers, including the upsert
+	// semantics for a page that overlaps what is already stored.
+	var pageV []*Video
+	var pageP []*Photo
+	for i := 0; i < 20; i++ {
+		pageV = append(pageV, &Video{
+			UserID: uid, ChannelID: topicID, TGMsgID: int64(2000 + i), Date: at(50 + i),
+			FileName: "batch.mp4", MediaType: "video_file", GroupedID: 555,
+			TGDocID: int64(8000 + i), AccessHash: 1, FileReference: []byte{1},
+		})
+		pageP = append(pageP, &Photo{
+			UserID: uid, ChannelID: topicID, TGMsgID: int64(3000 + i), Date: at(80 + i),
+			GroupedID: 666, TGPhotoID: int64(6000 + i), SizeType: "y",
+		})
+	}
+	pageV[3].Text = "批量相册标题"
+	pageP[7].Text = "批量图片相册标题"
+	if err := d.UpsertVideos(ctx, pageV); err != nil {
+		t.Fatal("UpsertVideos:", err)
+	}
+	if err := d.UpsertPhotos(ctx, pageP); err != nil {
+		t.Fatal("UpsertPhotos:", err)
+	}
+	// Re-writing the same page must be a no-op, not a duplicate.
+	if err := d.UpsertVideos(ctx, pageV); err != nil {
+		t.Fatal("UpsertVideos (repeat):", err)
+	}
+	if n, err := d.CountVideosByChannel(ctx, uid, topicID); err != nil || n != 25 {
+		t.Fatalf("after batch: video count = %d, %v (want 25)", n, err)
+	}
+	if err := d.UpsertVideos(ctx, nil); err != nil {
+		t.Fatal("empty batch must be a no-op:", err)
+	}
+
+	if err := d.PropagateCaptions(ctx, uid, topicID, []int64{555}, []int64{666}); err != nil {
+		t.Fatal("PropagateCaptions:", err)
+	}
+	var vCap, pCap string
+	if err := d.QueryRow(ctx, `SELECT COALESCE(text,'') FROM videos WHERE user_id=$1 AND tg_msg_id=2000`, uid).Scan(&vCap); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.QueryRow(ctx, `SELECT COALESCE(text,'') FROM photos WHERE user_id=$1 AND tg_msg_id=3000`, uid).Scan(&pCap); err != nil {
+		t.Fatal(err)
+	}
+	if vCap != "批量相册标题" || pCap != "批量图片相册标题" {
+		t.Fatalf("batched caption propagation failed: video=%q photo=%q", vCap, pCap)
+	}
+	if err := d.PropagateCaptions(ctx, uid, topicID, nil, nil); err != nil {
+		t.Fatal("empty propagate must be a no-op:", err)
+	}
+
+	// --- bulk thumb-path clearing (cache GC) -------------------------------
+	if err := d.SetPhotoThumbPath(ctx, pid, "thumbs/photo_1.jpg"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ClearThumbPaths(ctx, []int64{vid}, []int64{pid}); err != nil {
+		t.Fatal("ClearThumbPaths:", err)
+	}
+	if p, _ := d.PhotoByID(ctx, pid, uid); p.ThumbPath != "" {
+		t.Fatalf("thumb path not cleared: %q", p.ThumbPath)
+	}
+	if v, _ := d.VideoByID(ctx, vid, uid); v.ThumbPath != "" {
+		t.Fatalf("video thumb path not cleared: %q", v.ThumbPath)
+	}
+
 	// --- clearing a channel wipes both tables ------------------------------
 	nv, err := d.DeleteVideosByChannel(ctx, uid, topicID)
 	if err != nil {
@@ -373,7 +440,7 @@ func TestIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if nv != 5 || np != 7 {
+	if nv != 25 || np != 27 {
 		t.Fatalf("cleared %d videos / %d photos", nv, np)
 	}
 	if err := d.ResetHistoryComplete(ctx, topicID); err != nil {

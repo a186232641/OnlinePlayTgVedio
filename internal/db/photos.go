@@ -81,10 +81,7 @@ func scanPhoto(row pgx.Row) (*Photo, error) {
 	return p, nil
 }
 
-// UpsertPhoto writes one image row, idempotent on (user_id, channel_id,
-// tg_msg_id) — a message carries at most one photo.
-func (d *DB) UpsertPhoto(ctx context.Context, p *Photo) (int64, error) {
-	row := d.QueryRow(ctx, `
+const upsertPhotoSQL = `
         INSERT INTO photos (
             user_id, channel_id,
             tg_msg_id, msg_type, date, edited,
@@ -128,7 +125,10 @@ func (d *DB) UpsertPhoto(ctx context.Context, p *Photo) (int64, error) {
             size_type      = COALESCE(EXCLUDED.size_type, photos.size_type),
             thumb_size     = COALESCE(EXCLUDED.thumb_size, photos.thumb_size)
         RETURNING id
-    `,
+    `
+
+func upsertPhotoArgs(p *Photo) []any {
+	return []any{
 		p.UserID, p.ChannelID,
 		p.TGMsgID, nilIfEmpty(p.MsgType), p.Date, p.Edited,
 		nilIfEmpty(p.FromName), nilIfEmpty(p.FromID),
@@ -137,12 +137,31 @@ func (d *DB) UpsertPhoto(ctx context.Context, p *Photo) (int64, error) {
 		nilIfEmpty(p.Text), p.TextEntities, nilIfZero64(p.GroupedID),
 		p.TGPhotoID, p.AccessHash, p.FileReference, p.DCID,
 		nilIfEmpty(p.SizeType), nilIfEmpty(p.ThumbSize),
-	)
+	}
+}
+
+// UpsertPhoto writes one image row, idempotent on (user_id, channel_id,
+// tg_msg_id) — a message carries at most one photo.
+func (d *DB) UpsertPhoto(ctx context.Context, p *Photo) (int64, error) {
+	row := d.QueryRow(ctx, upsertPhotoSQL, upsertPhotoArgs(p)...)
 	var id int64
 	if err := row.Scan(&id); err != nil {
 		return 0, err
 	}
 	return id, nil
+}
+
+// UpsertPhotos writes a page of images in one round trip — see UpsertVideos for
+// why that matters.
+func (d *DB) UpsertPhotos(ctx context.Context, ps []*Photo) error {
+	if len(ps) == 0 {
+		return nil
+	}
+	b := &pgx.Batch{}
+	for _, p := range ps {
+		b.Queue(upsertPhotoSQL, upsertPhotoArgs(p)...)
+	}
+	return execBatch(ctx, d, b, len(ps))
 }
 
 // UpdatePhotoLocator persists a freshly resolved photo locator (first view of a
@@ -168,14 +187,7 @@ func (d *DB) SetPhotoThumbPath(ctx context.Context, id int64, path string) error
 	return err
 }
 
-// PropagatePhotoGroupCaption is PropagateGroupCaption for images: an album's
-// caption lives on exactly one member, copy it onto the silent siblings so a
-// text search finds all of them.
-func (d *DB) PropagatePhotoGroupCaption(ctx context.Context, userID, channelID, groupedID int64) error {
-	if groupedID == 0 {
-		return nil
-	}
-	_, err := d.Exec(ctx, `
+const propagatePhotoCaptionSQL = `
         WITH cap AS (
             SELECT text, text_entities
             FROM photos
@@ -188,7 +200,16 @@ func (d *DB) PropagatePhotoGroupCaption(ctx context.Context, userID, channelID, 
         FROM cap
         WHERE p.user_id=$1 AND p.channel_id=$2 AND p.grouped_id=$3
           AND COALESCE(p.text, '') = ''
-    `, userID, channelID, groupedID)
+    `
+
+// PropagatePhotoGroupCaption is PropagateGroupCaption for images: an album's
+// caption lives on exactly one member, copy it onto the silent siblings so a
+// text search finds all of them.
+func (d *DB) PropagatePhotoGroupCaption(ctx context.Context, userID, channelID, groupedID int64) error {
+	if groupedID == 0 {
+		return nil
+	}
+	_, err := d.Exec(ctx, propagatePhotoCaptionSQL, userID, channelID, groupedID)
 	return err
 }
 

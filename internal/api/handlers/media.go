@@ -141,7 +141,8 @@ func (h *ChannelsHandlers) ChannelMedia(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, httpx.Errorf(http.StatusBadRequest, "bad_id", "invalid channel id"))
 		return
 	}
-	if _, err := h.DB.ChannelByID(r.Context(), cid, uid); err != nil {
+	ch, err := h.DB.ChannelByID(r.Context(), cid, uid)
+	if err != nil {
 		httpx.WriteError(w, httpx.Errorf(http.StatusNotFound, "not_found", "channel not found"))
 		return
 	}
@@ -167,15 +168,16 @@ func (h *ChannelsHandlers) ChannelMedia(w http.ResponseWriter, r *http.Request) 
 	}
 
 	extra := map[string]any{}
-	// Totals only on the first page, and not under a streamer filter (the
-	// per-streamer count comes from /streamers instead) — they're two COUNT(*)s.
+	// Totals come from the counters on the channel row, which MarkChannelIndexed
+	// recomputes after every sync/import/clear. Counting the rows here instead
+	// would mean two full COUNT(*)s per first page — on a million-row channel
+	// that is hundreds of milliseconds on every open, to render a number that
+	// only changes when a sync finishes. The trade is that the figure is stale
+	// while a sync is mid-flight, which the progress line already covers.
+	// Skipped under a streamer filter: that count comes from /streamers.
 	if cursor.VideoID == 0 && cursor.PhotoID == 0 && !qv.Has("streamer") {
-		if n, err := h.DB.CountVideosByChannel(r.Context(), uid, cid); err == nil {
-			extra["total_videos"] = n
-		}
-		if n, err := h.DB.CountPhotosByChannel(r.Context(), uid, cid); err == nil {
-			extra["total_photos"] = n
-		}
+		extra["total_videos"] = ch.VideoCount
+		extra["total_photos"] = ch.PhotoCount
 	}
 	writeMediaPage(w, items, next, hasMore, extra)
 }

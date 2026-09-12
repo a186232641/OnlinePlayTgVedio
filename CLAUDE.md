@@ -124,7 +124,13 @@ re-runs sync. That is the migration path for images in channels synced before im
   newer than what we have; **Phase B backfill** = `OffsetID=MIN(tg_msg_id)` walks older history to
   the very bottom, then sets `channels.history_complete` so later sweeps skip the backfill. Write
   order doesn't matter — queries sort by `date`. A probe call first flags "stale access_hash / lost
-  membership" (0 messages). Sync state is **in-memory only** (`Indexer.syncs` map), surfaced via
+  membership" (0 messages). **Writes are batched per page** (`pageWrite` / `flushPage`): a page's
+  videos, its photos and its distinct album-caption propagations go out as three pgx batches — one
+  network round trip each — instead of one (often two) per message. On a million-message channel
+  that is the difference between hours and days; the round trips were never Telegram's fault. pgx
+  runs a batch in an implicit transaction, so a page lands whole or not at all, which is what the
+  resumable cursor wants. **Don't "simplify" this back to a per-message write.** Sync state is
+  **in-memory only** (`Indexer.syncs` map), surfaced via
   `GET /channels/{id}/sync` with live `walked`/`imported`/`videos`/`photos`/`skipped`. A background scheduler
   (`indexer/scheduler.go`, started in `main.go`) re-runs sync every `SYNC_INTERVAL` (env, default
   30m; 0/off disables) for every channel that is `last_indexed_at IS NOT NULL AND auto_sync`
@@ -156,8 +162,15 @@ time, into `<CACHE_DIR>/photos/<photo_id>.bin`) and hands it to `http.ServeFile`
 the same way but land in `<CACHE_DIR>/thumbs/<kind>_<row id>.jpg` and are fetched **lazily on first
 request**, so only what someone actually scrolls past costs an RPC. Concurrent requests for the
 same file are serialised by an in-process mutex map — a media grid asks for dozens of thumbs at
-once. Thumbs are not LRU-managed (tiny, and re-fetching per scroll would be worse) but their bytes
-count against the cap.
+once.
+
+Thumbnails get their **own slice of `CACHE_CAP_GB`** (10%, floor 1 GiB) reclaimed oldest-first by
+`evictThumbs` before media eviction runs. They are individually tiny but unbounded in count — an
+800k-image channel browsed end to end would otherwise crowd out every video on disk, and since
+nothing would reclaim them the GC could only keep logging "above cap". "Oldest" is mtime (fetch
+time), not last use: serving doesn't touch mtime and atime is unreliable, and the cost of guessing
+wrong is one re-download of a 20 KB file. Files in the thumb dir that don't match
+`<kind>_<row id>.jpg` are ignored rather than deleted.
 
 **Caching** (`internal/cache/cache.go`): **edge cache** — *every played* video is enqueued for a
 background full-file download (tdl-style multi-threaded; thread count scales with file size,
@@ -191,6 +204,11 @@ cursor. A plain `id < $n` cursor is **wrong** for the default date ordering: `id
 (insert order) while sync writes incremental-at-top and backfill-at-bottom, so id order ≠ date
 order and pages come up short, silently stopping pagination early. Sort keys: `date_desc` (default),
 `date_asc`, `name_asc`, `name_desc`, `duration` (the last keeps the legacy plain-id cursor).
+
+`channels.video_count` / `photo_count` are what the list endpoints report as totals, not a live
+`COUNT(*)`: on a million-row channel counting twice per first page costs hundreds of milliseconds
+to render a number that only changes when a sync finishes. `MarkChannelIndexed` recomputes them
+after every sync/import/clear; the figure is stale mid-sync, which the progress line covers.
 
 **API** (`internal/api/router.go`): chi router. The media-facing routes are
 `GET /channels/{id}/media` (merged list, `?kind=video|photo`), `GET /channels/{id}/topics` +

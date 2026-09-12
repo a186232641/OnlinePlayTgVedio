@@ -289,6 +289,7 @@ func (i *Indexer) walkHistory(
 		}
 
 		batchMin := 0
+		var page pageWrite
 		for _, mc := range msgs {
 			if id := mc.GetID(); id > 0 && (batchMin == 0 || id < batchMin) {
 				batchMin = id
@@ -297,9 +298,10 @@ func (i *Indexer) walkHistory(
 			if !ok {
 				continue
 			}
-			if err := i.writeMsg(ctx, ch, m, st); err != nil {
-				return false, err
-			}
+			page.add(ch, m)
+		}
+		if err := i.flushPage(ctx, ch, &page, st); err != nil {
+			return false, err
 		}
 
 		st.update(func(s *SyncState) { s.Walked += len(msgs) })
@@ -307,7 +309,7 @@ func (i *Indexer) walkHistory(
 			snap := st.snapshot()
 			slog.Info("sync progress",
 				"channel_id", ch.ID, "walked", snap.Walked,
-				"imported", snap.Imported, "skipped", snap.Skipped,
+				"videos", snap.Videos, "photos", snap.Photos, "skipped", snap.Skipped,
 				"cursor_msg_id", batchMin, "page_dur_ms", time.Since(lastTick).Milliseconds(),
 			)
 			sinceLog = 0
@@ -322,42 +324,76 @@ func (i *Indexer) walkHistory(
 	}
 }
 
-// writeMsg upserts one message's media (video or photo, whichever it carries),
-// updating live counters. Messages with neither are counted as skipped.
-func (i *Indexer) writeMsg(ctx context.Context, ch *db.Channel, m *tg.Message, st *syncEntry) error {
+// pageWrite accumulates one history page's rows so the whole page can be
+// written in a handful of round trips instead of one (often two) per message.
+//
+// That ratio is what decides whether a big channel syncs in hours or days: an
+// image-heavy channel is ~1M messages, and the old per-message path cost an
+// INSERT plus an album-caption UPDATE each — ~2M round trips, none of which
+// Telegram was waiting on.
+type pageWrite struct {
+	videos  []*db.Video
+	photos  []*db.Photo
+	skipped int
+
+	// Distinct album ids seen in this page; captions are propagated once per
+	// album at flush time rather than once per member.
+	videoGroups  []int64
+	photoGroups  []int64
+	seenVidGroup map[int64]struct{}
+	seenPhoGroup map[int64]struct{}
+}
+
+func (p *pageWrite) add(ch *db.Channel, m *tg.Message) {
 	if v := videoFromTGMessage(ch, m); v != nil {
-		if _, err := i.db.UpsertVideo(ctx, v); err != nil {
-			return fmt.Errorf("upsert video msg %d: %w", m.ID, err)
-		}
-		// Album member: spread the group's caption onto its silent siblings so all
-		// of them are searchable, not just the one message that carried the text.
+		p.videos = append(p.videos, v)
 		if v.GroupedID != 0 {
-			if err := i.db.PropagateGroupCaption(ctx, ch.UserID, ch.ID, v.GroupedID); err != nil {
-				return fmt.Errorf("propagate caption grp %d: %w", v.GroupedID, err)
+			if p.seenVidGroup == nil {
+				p.seenVidGroup = map[int64]struct{}{}
+			}
+			if _, dup := p.seenVidGroup[v.GroupedID]; !dup {
+				p.seenVidGroup[v.GroupedID] = struct{}{}
+				p.videoGroups = append(p.videoGroups, v.GroupedID)
 			}
 		}
-		st.update(func(s *SyncState) {
-			s.Imported++
-			s.Videos++
-		})
-		return nil
+		return
 	}
-	if p := photoFromTGMessage(ch, m); p != nil {
-		if _, err := i.db.UpsertPhoto(ctx, p); err != nil {
-			return fmt.Errorf("upsert photo msg %d: %w", m.ID, err)
-		}
-		if p.GroupedID != 0 {
-			if err := i.db.PropagatePhotoGroupCaption(ctx, ch.UserID, ch.ID, p.GroupedID); err != nil {
-				return fmt.Errorf("propagate photo caption grp %d: %w", p.GroupedID, err)
+	if ph := photoFromTGMessage(ch, m); ph != nil {
+		p.photos = append(p.photos, ph)
+		if ph.GroupedID != 0 {
+			if p.seenPhoGroup == nil {
+				p.seenPhoGroup = map[int64]struct{}{}
+			}
+			if _, dup := p.seenPhoGroup[ph.GroupedID]; !dup {
+				p.seenPhoGroup[ph.GroupedID] = struct{}{}
+				p.photoGroups = append(p.photoGroups, ph.GroupedID)
 			}
 		}
-		st.update(func(s *SyncState) {
-			s.Imported++
-			s.Photos++
-		})
-		return nil
+		return
 	}
-	st.update(func(s *SyncState) { s.Skipped++ })
+	p.skipped++
+}
+
+// flushPage writes the accumulated page and advances the live counters once.
+// Each Upsert*s call is one pgx batch = one round trip, run in an implicit
+// transaction, so a page lands whole or not at all — which is exactly what the
+// resumable cursor wants.
+func (i *Indexer) flushPage(ctx context.Context, ch *db.Channel, p *pageWrite, st *syncEntry) error {
+	if err := i.db.UpsertVideos(ctx, p.videos); err != nil {
+		return fmt.Errorf("upsert videos: %w", err)
+	}
+	if err := i.db.UpsertPhotos(ctx, p.photos); err != nil {
+		return fmt.Errorf("upsert photos: %w", err)
+	}
+	if err := i.db.PropagateCaptions(ctx, ch.UserID, ch.ID, p.videoGroups, p.photoGroups); err != nil {
+		return fmt.Errorf("propagate captions: %w", err)
+	}
+	st.update(func(s *SyncState) {
+		s.Imported += len(p.videos) + len(p.photos)
+		s.Videos += len(p.videos)
+		s.Photos += len(p.photos)
+		s.Skipped += p.skipped
+	})
 	return nil
 }
 

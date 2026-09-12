@@ -4,6 +4,8 @@ import (
 	"context"
 	"sort"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // Media kinds. A "media item" is the union of a videos row and a photos row —
@@ -286,4 +288,95 @@ func (d *DB) MinMsgIDForChannel(ctx context.Context, channelID, userID int64) (i
 		return 0, err
 	}
 	return n, nil
+}
+
+// execBatch runs a queued batch and drains exactly n results, returning the
+// first error. Every statement in our batches ends in RETURNING id, so results
+// are consumed with QueryRow rather than Exec.
+//
+// The BatchResults must be fully drained and closed before the pooled
+// connection is usable again, hence the unconditional Close.
+func execBatch(ctx context.Context, d *DB, b *pgx.Batch, n int) error {
+	br := d.SendBatch(ctx, b)
+	var firstErr error
+	for i := 0; i < n; i++ {
+		var id int64
+		if err := br.QueryRow().Scan(&id); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if err := br.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
+
+// execBatchNoResult is execBatch for statements that return no rows.
+func execBatchNoResult(ctx context.Context, d *DB, b *pgx.Batch, n int) error {
+	br := d.SendBatch(ctx, b)
+	var firstErr error
+	for i := 0; i < n; i++ {
+		if _, err := br.Exec(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if err := br.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
+
+// PropagateCaptions spreads each album's caption onto its silent siblings for a
+// whole page at once — one round trip instead of one per album member.
+//
+// Sync calls this once per page with the distinct grouped_ids it just wrote,
+// rather than once per message: a channel of image albums otherwise doubles its
+// write cost for no extra effect (the UPDATE is idempotent, and running it once
+// after all of a page's members are in place is strictly more likely to find
+// the captioned member than running it after each one).
+func (d *DB) PropagateCaptions(ctx context.Context, userID, channelID int64, videoGroups, photoGroups []int64) error {
+	b := &pgx.Batch{}
+	n := 0
+	for _, g := range videoGroups {
+		if g == 0 {
+			continue
+		}
+		b.Queue(propagateVideoCaptionSQL, userID, channelID, g)
+		n++
+	}
+	for _, g := range photoGroups {
+		if g == 0 {
+			continue
+		}
+		b.Queue(propagatePhotoCaptionSQL, userID, channelID, g)
+		n++
+	}
+	if n == 0 {
+		return nil
+	}
+	return execBatchNoResult(ctx, d, b, n)
+}
+
+// ClearThumbPaths forgets the on-disk thumbnails of the given rows, in one
+// round trip. Called by the cache GC after it reclaims thumbnail files so the
+// DB doesn't keep claiming files that are gone.
+//
+// Nothing actually *reads* thumb_path — the serving path derives the filename
+// from the row id — so a stale value is only a bookkeeping lie, not a broken
+// image. Keeping it honest is still worth one batched UPDATE.
+func (d *DB) ClearThumbPaths(ctx context.Context, videoIDs, photoIDs []int64) error {
+	b := &pgx.Batch{}
+	n := 0
+	for _, id := range videoIDs {
+		b.Queue(`UPDATE videos SET thumb_path=NULL WHERE id=$1`, id)
+		n++
+	}
+	for _, id := range photoIDs {
+		b.Queue(`UPDATE photos SET thumb_path=NULL WHERE id=$1`, id)
+		n++
+	}
+	if n == 0 {
+		return nil
+	}
+	return execBatchNoResult(ctx, d, b, n)
 }

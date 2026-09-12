@@ -99,9 +99,9 @@ func scanVideo(row pgx.Row) (*Video, error) {
 	return v, nil
 }
 
-// UpsertVideo writes a row from JSON import (idempotent on tg_msg_id).
-func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
-	row := d.QueryRow(ctx, `
+// upsertVideoSQL is shared by the single-row and batched writers so the two can
+// never drift apart.
+const upsertVideoSQL = `
         INSERT INTO videos (
             user_id, channel_id,
             tg_msg_id, msg_type, date, edited,
@@ -155,7 +155,10 @@ func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
             access_hash         = CASE WHEN EXCLUDED.tg_doc_id > 0 THEN EXCLUDED.access_hash ELSE videos.access_hash END,
             file_reference      = CASE WHEN EXCLUDED.tg_doc_id > 0 THEN EXCLUDED.file_reference ELSE videos.file_reference END
         RETURNING id
-    `,
+    `
+
+func upsertVideoArgs(v *Video) []any {
+	return []any{
 		v.UserID, v.ChannelID,
 		v.TGMsgID, nilIfEmpty(v.MsgType), v.Date, v.Edited,
 		nilIfEmpty(v.FromName), nilIfEmpty(v.FromID),
@@ -166,12 +169,35 @@ func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
 		nilIfEmpty(v.Text), v.TextEntities, nilIfZero64(v.GroupedID), v.DCID,
 		nilIfEmpty(v.ThumbSize),
 		v.TGDocID, v.AccessHash, v.FileReference,
-	)
+	}
+}
+
+// UpsertVideo writes a row from JSON import (idempotent on tg_msg_id).
+func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
+	row := d.QueryRow(ctx, upsertVideoSQL, upsertVideoArgs(v)...)
 	var id int64
 	if err := row.Scan(&id); err != nil {
 		return 0, err
 	}
 	return id, nil
+}
+
+// UpsertVideos writes a whole page of rows in ONE network round trip.
+//
+// This is the hot path of a full sync: a big channel is ~1M messages, and one
+// round trip per row (plus one per album caption propagation) means millions of
+// them — that, not Telegram, is what makes a first sync take a day. pgx runs a
+// batch in an implicit transaction, so a page is all-or-nothing, which is also
+// what resumable sync wants: no half-written page to reason about.
+func (d *DB) UpsertVideos(ctx context.Context, vs []*Video) error {
+	if len(vs) == 0 {
+		return nil
+	}
+	b := &pgx.Batch{}
+	for _, v := range vs {
+		b.Queue(upsertVideoSQL, upsertVideoArgs(v)...)
+	}
+	return execBatch(ctx, d, b, len(vs))
 }
 
 // nilIfZero64 maps 0 → SQL NULL so non-album rows leave grouped_id NULL (and
@@ -183,15 +209,9 @@ func nilIfZero64(n int64) any {
 	return n
 }
 
-// PropagateGroupCaption copies the caption of an album (one member carries it)
-// onto every sibling in the same group whose text is still empty, so a text
-// search matches all of the album's videos, not just the captioned one.
-// Idempotent and order-independent: safe to call after writing any member.
-func (d *DB) PropagateGroupCaption(ctx context.Context, userID, channelID, groupedID int64) error {
-	if groupedID == 0 {
-		return nil
-	}
-	_, err := d.Exec(ctx, `
+// propagateVideoCaptionSQL is shared with the batched page-level propagation in
+// media.go.
+const propagateVideoCaptionSQL = `
         WITH cap AS (
             SELECT text, text_entities
             FROM videos
@@ -204,7 +224,17 @@ func (d *DB) PropagateGroupCaption(ctx context.Context, userID, channelID, group
         FROM cap
         WHERE v.user_id=$1 AND v.channel_id=$2 AND v.grouped_id=$3
           AND COALESCE(v.text, '') = ''
-    `, userID, channelID, groupedID)
+    `
+
+// PropagateGroupCaption copies the caption of an album (one member carries it)
+// onto every sibling in the same group whose text is still empty, so a text
+// search matches all of the album's videos, not just the captioned one.
+// Idempotent and order-independent: safe to call after writing any member.
+func (d *DB) PropagateGroupCaption(ctx context.Context, userID, channelID, groupedID int64) error {
+	if groupedID == 0 {
+		return nil
+	}
+	_, err := d.Exec(ctx, propagateVideoCaptionSQL, userID, channelID, groupedID)
 	return err
 }
 
