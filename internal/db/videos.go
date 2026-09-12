@@ -417,6 +417,11 @@ type SearchVideosOpts struct {
 	OffsetID  int64
 	OrderBy   string
 	FavOnly   bool // restrict to the user's favorites (JOIN favorites)
+
+	// StreamerFilter behaves exactly like ListVideosOpts': when true, Streamer
+	// == "" means the NULL bucket (filenames that don't match the pattern).
+	StreamerFilter bool
+	Streamer       string
 }
 
 func (d *DB) SearchVideos(ctx context.Context, opt SearchVideosOpts) ([]Video, error) {
@@ -449,6 +454,14 @@ func (d *DB) SearchVideos(ctx context.Context, opt SearchVideosOpts) ([]Video, e
 	if opt.ChannelID != 0 {
 		args = append(args, opt.ChannelID)
 		where = append(where, "v.channel_id=$"+itoa(len(args)))
+	}
+	if opt.StreamerFilter {
+		if opt.Streamer == "" {
+			where = append(where, "v.streamer IS NULL")
+		} else {
+			args = append(args, opt.Streamer)
+			where = append(where, "v.streamer = $"+itoa(len(args)))
+		}
 	}
 	if opt.OffsetID > 0 {
 		args = append(args, opt.OffsetID)

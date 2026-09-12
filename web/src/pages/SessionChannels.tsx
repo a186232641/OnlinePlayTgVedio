@@ -9,6 +9,7 @@ import { AlertStrip, LoadingState, PageHeader, Toggle } from "../components/ui";
 interface ImportResp {
   ok: boolean;
   imported: number;
+  photos?: number;
   skipped: number;
   total: number;
   skip_by?: Record<string, number>;
@@ -16,9 +17,13 @@ interface ImportResp {
 
 interface SyncState {
   running: boolean;
-  phase?: "syncing" | "";
+  // "syncing" | "topics" | "话题 3/12: …" — a forum group's sync reports which
+  // topic it is on.
+  phase?: string;
   walked: number;
   imported: number;
+  videos: number;
+  photos: number;
   skipped: number;
   last_error?: string;
   started_at?: string;
@@ -41,7 +46,7 @@ async function uploadJsonImport(channelId: number, file: File): Promise<ImportRe
 }
 
 function formatImportResult(r: ImportResp): string {
-  let s = `导入完成: 写入 ${r.imported} 条视频\n总消息数 ${r.total},跳过 ${r.skipped} 条非视频消息`;
+  let s = `导入完成: 写入 ${r.imported} 条视频、${r.photos ?? 0} 张图片\n总消息数 ${r.total},跳过 ${r.skipped} 条无媒体消息`;
   if (r.skip_by && Object.keys(r.skip_by).length > 0) {
     const top = Object.entries(r.skip_by)
       .sort((a, b) => b[1] - a[1])
@@ -50,7 +55,7 @@ function formatImportResult(r: ImportResp): string {
       .join("\n");
     s += `\n\n跳过类型分布(前 8):\n${top}`;
   }
-  s += `\n\n首次播放时会从 TG 现取 file_reference,稍慢一点。`;
+  s += `\n\n首次播放/查看时会从 TG 现取 file_reference,稍慢一点。`;
   return s;
 }
 
@@ -81,12 +86,19 @@ export function SessionChannels() {
       return res.json();
     },
     onSettled: () => qc.invalidateQueries({ queryKey: ["channels"] }),
-    onSuccess: (resp: { deleted: number }) => alert(`已清空 ${resp.deleted} 条视频`),
+    onSuccess: (resp: { deleted: number; videos: number; photos: number }) =>
+      alert(`已清空 ${resp.deleted} 条 (视频 ${resp.videos} · 图片 ${resp.photos})`),
     onError: (err: Error) => alert(`清空失败: ${err.message}`),
   });
   const syncStart = useMutation({
     mutationFn: (cid: number) => api.post<SyncState>(`/api/channels/${cid}/sync`),
     onError: (err: Error) => alert(`同步启动失败: ${err.message}`),
+  });
+  // Re-arms the full-history walk. Needed to pick up media kinds that a channel
+  // was already "done" for — images, for a channel synced before image support.
+  const backfill = useMutation({
+    mutationFn: (cid: number) => api.post<SyncState>(`/api/channels/${cid}/backfill`),
+    onError: (err: Error) => alert(`回填启动失败: ${err.message}`),
   });
 
   const list = q.data?.channels ?? [];
@@ -134,9 +146,9 @@ export function SessionChannels() {
       <div className="card" >
         <div className="hidden items-center gap-4 rounded-t-2xl border-b border-gray-200 bg-gray-50 px-5 py-3 text-theme-xs font-medium text-gray-500 lg:flex dark:border-gray-800 dark:bg-white/[0.02] dark:text-gray-400">
           <span className="flex-1">频道</span>
-          <span className="w-24 text-right">视频数</span>
+          <span className="w-24 text-right">视频 / 图片</span>
           <span className="w-20 text-center">自动同步</span>
-          <span className="w-[280px] text-right">操作</span>
+          <span className="w-[360px] text-right">操作</span>
         </div>
 
         {visible.length === 0 ? (
@@ -151,11 +163,20 @@ export function SessionChannels() {
                 c={c}
                 onImport={(file) => importJson.mutate({ cid: c.id, file })}
                 onClear={() => {
-                  if (confirm(`清空 ${c.title} 的所有视频(${c.video_count} 条)?\n\n收藏会一并删除。常用于"重置后重新导入"。`)) {
+                  if (confirm(`清空 ${c.title} 的所有视频和图片(${c.video_count + c.photo_count} 条)?\n\n收藏会一并删除。常用于"重置后重新导入"。`)) {
                     clearChannel.mutate(c.id);
                   }
                 }}
                 onSync={() => syncStart.mutate(c.id)}
+                onBackfill={() => {
+                  if (
+                    confirm(
+                      `重新回填 ${c.title}?\n\n会重置"历史已走完"标记,下次同步从最早的消息重新走一遍,用来补齐旧的图片(已入库的不会重复写)。`,
+                    )
+                  ) {
+                    backfill.mutate(c.id);
+                  }
+                }}
                 importing={importJson.isPending && importJson.variables?.cid === c.id}
                 clearing={clearChannel.isPending && clearChannel.variables === c.id}
               />
@@ -168,12 +189,13 @@ export function SessionChannels() {
 }
 
 function ChannelRow({
-  c, onImport, onClear, onSync, importing, clearing,
+  c, onImport, onClear, onSync, onBackfill, importing, clearing,
 }: {
   c: Channel;
   onImport: (file: File) => void;
   onClear: () => void;
   onSync: () => void;
+  onBackfill: () => void;
   importing: boolean;
   clearing: boolean;
 }) {
@@ -199,7 +221,14 @@ function ChannelRow({
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-3 px-5 py-3.5">
       <div className="min-w-[220px] flex-1">
-        <div className="truncate font-medium text-gray-800 dark:text-white/90">{c.title}</div>
+        <div className="flex items-center gap-2">
+          <span className="truncate font-medium text-gray-800 dark:text-white/90">{c.title}</span>
+          {c.is_forum && (
+            <span className="badge badge-gray shrink-0" title="论坛群组:同步会先拉话题列表,再逐个话题同步">
+              话题群组 {c.topic_count > 0 ? c.topic_count : ""}
+            </span>
+          )}
+        </div>
         {c.username && (
           <div className="truncate text-theme-xs text-gray-500 dark:text-gray-400">
             @{c.username}
@@ -208,8 +237,9 @@ function ChannelRow({
 
         {isSyncing && (
           <div className="mt-1 text-theme-xs text-warning-600 dark:text-warning-400">
-            正在从 TG 同步:已遍历 {sync.data?.walked ?? 0} · 写入 {sync.data?.imported ?? 0} · 跳过{" "}
-            {sync.data?.skipped ?? 0}
+            {sync.data?.phase && sync.data.phase !== "syncing" && `${sync.data.phase} · `}
+            正在从 TG 同步:已遍历 {sync.data?.walked ?? 0} · 视频 {sync.data?.videos ?? 0} · 图片{" "}
+            {sync.data?.photos ?? 0} · 跳过 {sync.data?.skipped ?? 0}
             <span className="text-gray-400 dark:text-gray-500">
               {" "}(边抓边写,首次大频道可能需多轮,中断会自动续传)
             </span>
@@ -232,6 +262,9 @@ function ChannelRow({
 
       <div className="w-24 text-right text-theme-sm tabular-nums text-gray-600 dark:text-gray-300">
         {c.video_count.toLocaleString()}
+        {c.photo_count > 0 && (
+          <span className="block text-theme-xs text-gray-400">+{c.photo_count.toLocaleString()} 图</span>
+        )}
       </div>
 
       <div className="flex w-20 justify-center">
@@ -256,7 +289,7 @@ function ChannelRow({
         }}
       />
 
-      <div className="flex w-full items-center justify-end gap-2 lg:w-[280px]">
+      <div className="flex w-full flex-wrap items-center justify-end gap-2 lg:w-[360px]">
         <button
           onClick={onSync}
           disabled={busy}
@@ -275,12 +308,23 @@ function ChannelRow({
           <UploadIcon className="size-4" />
           {importing ? "上传中…" : "导入 JSON"}
         </button>
-        {c.video_count > 0 && (
+        {(c.video_count > 0 || c.photo_count > 0) && (
+          <button
+            onClick={onBackfill}
+            disabled={busy}
+            className="btn btn-outline btn-sm"
+            title="重置「历史已走完」标记并重新同步 — 用来补齐旧消息里的图片"
+          >
+            <RefreshIcon className="size-4" />
+            重新回填
+          </button>
+        )}
+        {(c.video_count > 0 || c.photo_count > 0) && (
           <button
             onClick={onClear}
             disabled={busy}
             className="btn btn-danger btn-sm"
-            title="清空该频道所有视频(用于重新导入)"
+            title="清空该频道所有视频和图片(用于重新导入)"
           >
             <TrashIcon className="size-4" />
             {clearing ? "清空中…" : "清空"}

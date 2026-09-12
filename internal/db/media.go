@@ -70,6 +70,11 @@ type ListMediaOpts struct {
 	OrderBy   string
 	Limit     int
 	Cursor    MediaCursor
+
+	// StreamerFilter scopes to one streamer (a videos-only filename convention),
+	// which implies Kind == video.
+	StreamerFilter bool
+	Streamer       string
 }
 
 // ListMedia returns one page of the merged video+photo list.
@@ -91,6 +96,11 @@ func (d *DB) ListMedia(ctx context.Context, opt ListMediaOpts) ([]MediaItem, Med
 	if opt.OrderBy == "duration" {
 		opt.Kind = MediaKindVideo
 	}
+	// The streamer bucket is derived from videos.file_name — images have no
+	// equivalent, so filtering by one means "videos only".
+	if opt.StreamerFilter {
+		opt.Kind = MediaKindVideo
+	}
 
 	next := opt.Cursor
 	items := make([]MediaItem, 0, limit*2)
@@ -109,6 +119,9 @@ func (d *DB) ListMedia(ctx context.Context, opt ListMediaOpts) ([]MediaItem, Med
 			OrderBy:   opt.OrderBy,
 			Limit:     limit,
 			OffsetID:  opt.Cursor.VideoID,
+
+			StreamerFilter: opt.StreamerFilter,
+			Streamer:       opt.Streamer,
 		})
 		if err != nil {
 			return nil, next, false, err

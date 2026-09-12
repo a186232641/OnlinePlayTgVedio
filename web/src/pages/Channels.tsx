@@ -2,11 +2,13 @@ import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 
 import { api, Channel, TgSession } from "../api/client";
-import { ChevronRightIcon } from "../components/icons";
+import { ChevronRightIcon, TopicsIcon } from "../components/icons";
 import { EmptyState, LoadingState, PageHeader } from "../components/ui";
 
-// Browsing view: any channel that has imported videos shows up as a card.
-// Forums and topics are filtered out by the backend.
+// Browsing view: any channel/group with imported media shows up as a card, plus
+// forum groups that have topics (their media lives one level down, in the
+// topics, so their own counts are zero). Topic rows themselves are reached from
+// the group card, not listed here.
 export function Channels() {
   const sessions = useQuery<{ sessions: TgSession[] }>({
     queryKey: ["sessions"],
@@ -21,8 +23,11 @@ export function Channels() {
 
   const sessList = sessions.data?.sessions ?? [];
   const channels = all.data?.channels ?? [];
-  const browsable = channels.filter((c) => c.video_count > 0);
+  const browsable = channels.filter(
+    (c) => c.video_count > 0 || c.photo_count > 0 || (c.is_forum && c.topic_count > 0),
+  );
   const totalVideos = browsable.reduce((n, c) => n + c.video_count, 0);
+  const totalPhotos = browsable.reduce((n, c) => n + c.photo_count, 0);
 
   return (
     <div className="p-4 md:p-6">
@@ -30,7 +35,13 @@ export function Channels() {
         title="我的频道"
         meta={
           browsable.length > 0
-            ? `${browsable.length} 个频道 · ${totalVideos.toLocaleString()} 个视频`
+            ? [
+                `${browsable.length} 个频道/群组`,
+                totalVideos > 0 && `${totalVideos.toLocaleString()} 个视频`,
+                totalPhotos > 0 && `${totalPhotos.toLocaleString()} 张图片`,
+              ]
+                .filter(Boolean)
+                .join(" · ")
             : undefined
         }
       />
@@ -47,8 +58,8 @@ export function Channels() {
         />
       ) : browsable.length === 0 ? (
         <EmptyState
-          title="还没有导入任何视频"
-          hint="到 TG 账号管理里对频道执行「TG 同步」,或上传 Telegram Desktop 导出的 result.json。"
+          title="还没有导入任何内容"
+          hint="到 TG 账号管理里对频道/群组执行「TG 同步」,或上传 Telegram Desktop 导出的 result.json。论坛群组会先拉话题列表,再逐个话题同步。"
           action={
             <Link to="/tg/accounts" className="btn btn-primary">
               去 TG 账号管理
@@ -72,8 +83,19 @@ export function Channels() {
                     @{c.username}
                   </div>
                 )}
-                <div className="mt-3">
-                  <span className="badge badge-brand">{c.video_count.toLocaleString()} 视频</span>
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {c.is_forum && (
+                    <span className="badge badge-gray inline-flex items-center gap-1">
+                      <TopicsIcon className="size-3" />
+                      {c.topic_count.toLocaleString()} 话题
+                    </span>
+                  )}
+                  {c.video_count > 0 && (
+                    <span className="badge badge-brand">{c.video_count.toLocaleString()} 视频</span>
+                  )}
+                  {c.photo_count > 0 && (
+                    <span className="badge badge-gray">{c.photo_count.toLocaleString()} 图片</span>
+                  )}
                 </div>
               </div>
               <ChevronRightIcon className="size-5 shrink-0 text-gray-300 transition-colors group-hover:text-brand-500 dark:text-gray-600" />

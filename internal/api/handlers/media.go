@@ -157,6 +157,9 @@ func (h *ChannelsHandlers) ChannelMedia(w http.ResponseWriter, r *http.Request) 
 		OrderBy:   qv.Get("order"),
 		Limit:     limit,
 		Cursor:    cursor,
+		// streamer present (even empty, = the NULL bucket) ⇒ filter on it.
+		StreamerFilter: qv.Has("streamer"),
+		Streamer:       qv.Get("streamer"),
 	})
 	if err != nil {
 		httpx.WriteError(w, err)
@@ -164,8 +167,9 @@ func (h *ChannelsHandlers) ChannelMedia(w http.ResponseWriter, r *http.Request) 
 	}
 
 	extra := map[string]any{}
-	// Totals only on the first page — they're two COUNT(*)s.
-	if cursor.VideoID == 0 && cursor.PhotoID == 0 {
+	// Totals only on the first page, and not under a streamer filter (the
+	// per-streamer count comes from /streamers instead) — they're two COUNT(*)s.
+	if cursor.VideoID == 0 && cursor.PhotoID == 0 && !qv.Has("streamer") {
 		if n, err := h.DB.CountVideosByChannel(r.Context(), uid, cid); err == nil {
 			extra["total_videos"] = n
 		}

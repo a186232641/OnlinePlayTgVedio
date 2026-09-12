@@ -3,12 +3,11 @@ import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClie
 import { useEffect, useMemo, useRef, useState } from "react";
 import mpegts from "mpegts.js";
 
-import { api, Video } from "../api/client";
+import { api, MediaCursor, MediaItem, MediaPage, Video } from "../api/client";
 import { ChevronLeftIcon, ChevronRightIcon, PlayIcon, StarIcon } from "../components/icons";
 import { LoadingState, Spinner, cx } from "../components/ui";
 
 interface VideoResp { video: Video; favorite: boolean }
-interface VideosResp { videos: Video[] }
 
 const MEDIA_ERR_LABEL: Record<number, string> = {
   1: "ABORTED 用户取消加载",
@@ -19,11 +18,14 @@ const MEDIA_ERR_LABEL: Record<number, string> = {
 
 const PLAYLIST_PAGE_SIZE = 500;
 
-// playlistRequest builds the base URL (without offset_id) based on URL params:
-//   ?ch=13                  → channel videos
+// playlistRequest builds the base URL (without the cursor) based on URL params:
+//   ?ch=13                  → channel/topic media
 //   ?q=foo&ch=13            → search results (optionally channel-scoped)
 //   ?text=...&date_from=... → advanced search filters
 //   ?fav=1                  → favorites
+//
+// Every branch hits the merged media endpoints with kind=video: the playlist is
+// a queue of things to *play*, and an image in it would have nowhere to go.
 function playlistRequest(p: URLSearchParams): string | null {
   const ch = p.get("ch");
   const q = p.get("q");
@@ -36,43 +38,47 @@ function playlistRequest(p: URLSearchParams): string | null {
   // matches the page the user came from (and prev/next walk in that order).
   const order = p.get("order");
 
+  const base = () => {
+    const qs = new URLSearchParams({ limit: String(PLAYLIST_PAGE_SIZE), kind: "video" });
+    if (order) qs.set("order", order);
+    return qs;
+  };
+
   if (fav) {
-    const qs = new URLSearchParams({ limit: String(PLAYLIST_PAGE_SIZE) });
+    const qs = base();
     if (fileName) qs.set("file_name", fileName);
     if (dateFrom) qs.set("date_from", dateFrom);
     if (dateTo) qs.set("date_to", dateTo);
-    if (order) qs.set("order", order);
     return `/api/favorites/?${qs}`;
   }
 
   const hasSearch = !!(q || text || fileName || dateFrom || dateTo);
   if (hasSearch) {
-    const qs = new URLSearchParams({ limit: String(PLAYLIST_PAGE_SIZE) });
+    const qs = base();
     if (q) qs.set("q", q);
     if (text) qs.set("text", text);
     if (fileName) qs.set("file_name", fileName);
     if (dateFrom) qs.set("date_from", dateFrom);
     if (dateTo) qs.set("date_to", dateTo);
     if (ch) qs.set("channel_id", ch);
-    if (order) qs.set("order", order);
-    return `/api/videos/search?${qs}`;
+    return `/api/media/search?${qs}`;
   }
   if (ch) {
-    const qs = new URLSearchParams({ limit: String(PLAYLIST_PAGE_SIZE) });
+    const qs = base();
     // Grouped channel view links carry ?streamer=... (possibly empty = the
     // "其它" bucket) — keep the playlist scoped to that streamer.
     if (p.has("streamer")) qs.set("streamer", p.get("streamer") ?? "");
-    if (order) qs.set("order", order);
-    return `/api/channels/${ch}/videos?${qs}`;
+    return `/api/channels/${ch}/media?${qs}`;
   }
   return null;
 }
 
-// withOffset appends offset_id=N as a keyset cursor.
-function withOffset(url: string, offsetID: number): string {
-  if (offsetID <= 0) return url;
+// withCursor appends the merged-list keyset cursor. Only the video half matters
+// here (the playlist is kind=video), but the shape stays the server's.
+function withCursor(url: string, cursor: MediaCursor): string {
+  if (!cursor.video) return url;
   const sep = url.includes("?") ? "&" : "?";
-  return `${url}${sep}offset_id=${offsetID}`;
+  return `${url}${sep}offset_video=${cursor.video}`;
 }
 
 export function Player() {
@@ -134,22 +140,19 @@ export function Player() {
   // Playlist (siblings from the same context). useInfiniteQuery so we can
   // page past 500 items as the user scrolls / autoplays towards the bottom.
   const baseURL = playlistRequest(searchParams);
-  const playlist = useInfiniteQuery<VideosResp>({
+  const playlist = useInfiniteQuery<MediaPage>({
     queryKey: ["playlist", playlistKey],
     enabled: !!baseURL,
-    initialPageParam: 0,
+    initialPageParam: {} as MediaCursor,
     queryFn: ({ pageParam }) => {
-      if (!baseURL) return Promise.resolve({ videos: [] });
-      return api.get<VideosResp>(withOffset(baseURL, pageParam as number));
+      if (!baseURL) return Promise.resolve({ items: [], next: {}, has_more: false });
+      return api.get<MediaPage>(withCursor(baseURL, pageParam as MediaCursor));
     },
-    getNextPageParam: (last) => {
-      if (last.videos.length < PLAYLIST_PAGE_SIZE) return undefined;
-      return last.videos[last.videos.length - 1]?.id;
-    },
+    getNextPageParam: (last) => (last.has_more ? last.next : undefined),
   });
 
-  const list = useMemo<Video[]>(
-    () => playlist.data?.pages.flatMap((p) => p.videos) ?? [],
+  const list = useMemo<MediaItem[]>(
+    () => playlist.data?.pages.flatMap((p) => p.items) ?? [],
     [playlist.data],
   );
   const currentIdx = useMemo(

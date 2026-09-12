@@ -1,21 +1,22 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { useInfiniteQuery } from "@tanstack/react-query";
 
-import { api, ApiError, Video } from "../api/client";
-import { VideoGrid } from "../components/VideoGrid";
+import { ApiError, MediaItem, MediaKindFilter } from "../api/client";
+import { MEDIA_PAGE_SIZE, useMediaPages } from "../api/media";
+import { KindTabs, MediaBrowser } from "../components/MediaBrowser";
 import { SortSelect, SortValue, normalizeSort, DEFAULT_SORT } from "../components/SortSelect";
-import { AlertStrip, LoadingState, MoreFooter, PageHeader } from "../components/ui";
-
-interface Page { videos: Video[] }
-
-const PAGE_SIZE = 200;
+import { AlertStrip, MoreFooter, PageHeader } from "../components/ui";
 
 interface Filters {
   fileName: string;
   dateFrom: string; // yyyy-mm-dd
   dateTo: string;
   order: SortValue;
+  kind: MediaKindFilter;
+}
+
+function normalizeKind(s: string | null): MediaKindFilter {
+  return s === "video" || s === "photo" ? s : "";
 }
 
 // URL is the source of truth so returning from a video restores the filtered,
@@ -26,6 +27,7 @@ function filtersFromParams(p: URLSearchParams): Filters {
     dateFrom: p.get("date_from") ?? "",
     dateTo: p.get("date_to") ?? "",
     order: normalizeSort(p.get("order")),
+    kind: normalizeKind(p.get("kind")),
   };
 }
 
@@ -35,6 +37,7 @@ function paramsFromFilters(f: Filters): URLSearchParams {
   if (f.dateFrom) p.set("date_from", f.dateFrom);
   if (f.dateTo) p.set("date_to", f.dateTo);
   if (f.order !== DEFAULT_SORT) p.set("order", f.order);
+  if (f.kind) p.set("kind", f.kind);
   return p;
 }
 
@@ -45,28 +48,16 @@ export function Favorites() {
   const [draft, setDraft] = useState<Filters>(submitted);
   useEffect(() => { setDraft(submitted); }, [searchParams]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const q = useInfiniteQuery<Page>({
-    queryKey: ["favorites", submitted],
-    initialPageParam: 0,
-    queryFn: async ({ pageParam }) => {
-      const cursor = pageParam as number;
-      const qs = new URLSearchParams({ limit: String(PAGE_SIZE) });
-      if (submitted.fileName) qs.set("file_name", submitted.fileName);
-      if (submitted.dateFrom) qs.set("date_from", submitted.dateFrom);
-      if (submitted.dateTo) qs.set("date_to", submitted.dateTo);
-      if (submitted.order !== DEFAULT_SORT) qs.set("order", submitted.order);
-      if (cursor > 0) qs.set("offset_id", String(cursor));
-      return api.get<Page>(`/api/favorites/?${qs}`);
-    },
-    getNextPageParam: (last) =>
-      last.videos.length < PAGE_SIZE ? undefined : last.videos[last.videos.length - 1]?.id,
-  });
+  const { query: q, items } = useMediaPages(
+    ["favorites", submitted],
+    () => paramsFromFilters(submitted),
+    { path: "/api/favorites/" },
+  );
 
-  const all = useMemo<Video[]>(() => q.data?.pages.flatMap((p) => p.videos) ?? [], [q.data]);
   const filtered = !!(submitted.fileName || submitted.dateFrom || submitted.dateTo);
 
-  const changeOrder = (order: SortValue) =>
-    setSearchParams(paramsFromFilters({ ...submitted, order }));
+  const patch = (next: Partial<Filters>) =>
+    setSearchParams(paramsFromFilters({ ...submitted, ...next }));
 
   if (q.error) {
     const err = q.error as ApiError;
@@ -81,6 +72,17 @@ export function Favorites() {
     );
   }
 
+  // Videos carry the filter context into the player so prev/next walk the same
+  // filtered favorites list.
+  const linkTo = (m: MediaItem) => {
+    const p = new URLSearchParams({ fav: "1" });
+    if (submitted.fileName) p.set("file_name", submitted.fileName);
+    if (submitted.dateFrom) p.set("date_from", submitted.dateFrom);
+    if (submitted.dateTo) p.set("date_to", submitted.dateTo);
+    if (submitted.order !== DEFAULT_SORT) p.set("order", submitted.order);
+    return `/videos/${m.id}?${p}`;
+  };
+
   return (
     <div className="space-y-5 p-4 md:p-6">
       <PageHeader
@@ -88,8 +90,8 @@ export function Favorites() {
         meta={
           <>
             {filtered ? "命中" : "共"}{" "}
-            <span className="font-medium text-gray-700 dark:text-gray-300">{all.length}</span> 条收藏
-            {q.hasNextPage ? " (还有更多)" : ""} · 收藏的视频会被固定在磁盘缓存里
+            <span className="font-medium text-gray-700 dark:text-gray-300">{items.length}</span> 条收藏
+            {q.hasNextPage ? " (还有更多)" : ""} · 收藏的视频和图片会被固定在磁盘缓存里
           </>
         }
       />
@@ -134,44 +136,41 @@ export function Favorites() {
               type="button"
               onClick={() =>
                 setSearchParams(
-                  paramsFromFilters({ fileName: "", dateFrom: "", dateTo: "", order: submitted.order }),
+                  paramsFromFilters({
+                    fileName: "",
+                    dateFrom: "",
+                    dateTo: "",
+                    order: submitted.order,
+                    kind: submitted.kind,
+                  }),
                 )
               }
               className="btn btn-outline"
             >清空</button>
           )}
+          <KindTabs value={submitted.kind} onChange={(kind) => patch({ kind })} />
           <SortSelect
             value={submitted.order}
-            onChange={changeOrder}
+            onChange={(order) => patch({ order })}
             className="field field-select ml-auto w-auto"
           />
         </div>
       </form>
 
-      {q.isLoading ? (
-        <LoadingState />
-      ) : (
-        <VideoGrid
-          videos={all}
-          emptyLabel={filtered ? "无匹配收藏" : "暂无收藏 — 播放页点「收藏」即可加入"}
-          linkTo={(v) => {
-            const p = new URLSearchParams({ fav: "1" });
-            if (submitted.fileName) p.set("file_name", submitted.fileName);
-            if (submitted.dateFrom) p.set("date_from", submitted.dateFrom);
-            if (submitted.dateTo) p.set("date_to", submitted.dateTo);
-            if (submitted.order !== DEFAULT_SORT) p.set("order", submitted.order);
-            return `/videos/${v.id}?${p}`;
-          }}
-        />
-      )}
+      <MediaBrowser
+        items={items}
+        isLoading={q.isLoading}
+        linkTo={linkTo}
+        emptyLabel={filtered ? "无匹配收藏" : "暂无收藏 — 播放页或图片查看器里点「收藏」即可加入"}
+      />
 
       <MoreFooter
         hasNextPage={!!q.hasNextPage}
         isFetchingNextPage={q.isFetchingNextPage}
         fetchNextPage={q.fetchNextPage}
         doneLabel="已加载全部"
-        loaded={all.length}
-        pageSize={PAGE_SIZE}
+        loaded={items.length}
+        pageSize={MEDIA_PAGE_SIZE}
       />
     </div>
   );

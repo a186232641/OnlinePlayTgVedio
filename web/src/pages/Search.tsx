@@ -1,15 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 
-import { api, Channel, Video } from "../api/client";
-import { VideoGrid } from "../components/VideoGrid";
+import { api, Channel, MediaKindFilter } from "../api/client";
+import { MEDIA_PAGE_SIZE, useMediaPages } from "../api/media";
+import { KindTabs, MediaBrowser } from "../components/MediaBrowser";
 import { SortSelect, SortValue, normalizeSort, DEFAULT_SORT } from "../components/SortSelect";
 import { EmptyState, LoadingState, MoreFooter, PageHeader } from "../components/ui";
-
-interface Page { videos: Video[] }
-
-const PAGE_SIZE = 200;
 
 interface Filters {
   text: string;
@@ -18,6 +15,11 @@ interface Filters {
   dateTo: string;
   channelID: number;
   order: SortValue;
+  kind: MediaKindFilter;
+}
+
+function normalizeKind(s: string | null): MediaKindFilter {
+  return s === "video" || s === "photo" ? s : "";
 }
 
 // The URL query string is the single source of truth for the active search, so
@@ -31,6 +33,7 @@ function filtersFromParams(p: URLSearchParams): Filters {
     dateTo: p.get("date_to") ?? "",
     channelID: Number(p.get("channel_id") ?? "0") || 0,
     order: normalizeSort(p.get("order")),
+    kind: normalizeKind(p.get("kind")),
   };
 }
 
@@ -42,6 +45,7 @@ function paramsFromFilters(f: Filters): URLSearchParams {
   if (f.dateTo) p.set("date_to", f.dateTo);
   if (f.channelID > 0) p.set("channel_id", String(f.channelID));
   if (f.order !== DEFAULT_SORT) p.set("order", f.order);
+  if (f.kind) p.set("kind", f.kind);
   return p;
 }
 
@@ -63,31 +67,20 @@ export function Search() {
     queryFn: () => api.get("/api/channels/"),
   });
 
-  const result = useInfiniteQuery<Page>({
-    queryKey: ["search", submitted],
-    enabled: hasAny(submitted),
-    initialPageParam: 0,
-    queryFn: async ({ pageParam }) => {
-      const cursor = pageParam as number;
-      const qs = new URLSearchParams({ limit: String(PAGE_SIZE) });
+  const { query: result, items: all } = useMediaPages(
+    ["search", submitted],
+    () => {
+      const qs = new URLSearchParams();
       if (submitted.text) qs.set("text", submitted.text);
       if (submitted.fileName) qs.set("file_name", submitted.fileName);
       if (submitted.dateFrom) qs.set("date_from", submitted.dateFrom);
       if (submitted.dateTo) qs.set("date_to", submitted.dateTo);
       if (submitted.channelID > 0) qs.set("channel_id", String(submitted.channelID));
       if (submitted.order !== DEFAULT_SORT) qs.set("order", submitted.order);
-      if (cursor > 0) qs.set("offset_id", String(cursor));
-      return api.get<Page>(`/api/videos/search?${qs}`);
+      if (submitted.kind) qs.set("kind", submitted.kind);
+      return qs;
     },
-    getNextPageParam: (last) => {
-      if (last.videos.length < PAGE_SIZE) return undefined;
-      return last.videos[last.videos.length - 1]?.id;
-    },
-  });
-
-  const all = useMemo<Video[]>(
-    () => result.data?.pages.flatMap((p) => p.videos) ?? [],
-    [result.data],
+    { path: "/api/media/search", enabled: hasAny(submitted) },
   );
 
   // Sort applies immediately to the active search (re-sorts the URL), keeping
@@ -97,7 +90,7 @@ export function Search() {
 
   return (
     <div className="space-y-5 p-4 md:p-6">
-      <PageHeader title="搜索" meta="文件名 / 正文 / 日期范围 / 频道,每个字段都是 ILIKE 模糊匹配" />
+      <PageHeader title="搜索" meta="文件名 / 正文 / 日期范围 / 频道,每个字段都是 ILIKE 模糊匹配 — 视频和图片一起搜" />
 
       <form
         onSubmit={(e) => { e.preventDefault(); setSearchParams(paramsFromFilters(draft)); }}
@@ -127,7 +120,7 @@ export function Search() {
           >
             <option value={0}>全部频道</option>
             {(channels.data?.channels ?? [])
-              .filter((c) => c.video_count > 0)
+              .filter((c) => c.video_count > 0 || c.photo_count > 0)
               .map((c) => (
                 <option key={c.id} value={c.id}>{c.title}</option>
               ))}
@@ -175,6 +168,10 @@ export function Search() {
               命中 <span className="font-medium text-gray-700 dark:text-gray-300">{all.length}</span> 条
               {result.hasNextPage ? " (还有更多)" : ""}
             </span>
+            <KindTabs
+              value={submitted.kind}
+              onChange={(kind) => setSearchParams(paramsFromFilters({ ...submitted, kind }))}
+            />
             <SortSelect
               value={submitted.order}
               onChange={changeOrder}
@@ -182,10 +179,10 @@ export function Search() {
             />
           </div>
 
-          <VideoGrid
-            videos={all}
+          <MediaBrowser
+            items={all}
             emptyLabel="无匹配结果"
-            linkTo={(v) => {
+            linkTo={(m) => {
               const p = new URLSearchParams();
               if (submitted.text) p.set("text", submitted.text);
               if (submitted.fileName) p.set("file_name", submitted.fileName);
@@ -193,7 +190,8 @@ export function Search() {
               if (submitted.dateTo) p.set("date_to", submitted.dateTo);
               if (submitted.channelID > 0) p.set("ch", String(submitted.channelID));
               if (submitted.order !== DEFAULT_SORT) p.set("order", submitted.order);
-              return `/videos/${v.id}?${p}`;
+              if (submitted.kind) p.set("kind", submitted.kind);
+              return `/videos/${m.id}?${p}`;
             }}
           />
 
@@ -203,7 +201,7 @@ export function Search() {
             fetchNextPage={result.fetchNextPage}
             doneLabel="已加载全部"
             loaded={all.length}
-            pageSize={PAGE_SIZE}
+            pageSize={MEDIA_PAGE_SIZE}
           />
         </>
       )}

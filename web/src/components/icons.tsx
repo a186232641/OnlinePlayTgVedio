@@ -149,3 +149,30 @@ export const PencilIcon = (p: IconProps) => (
     <path d="M4 20h4L19.5 8.5a2.12 2.12 0 0 0-3-3L5 17v3z" />
   </Icon>
 );
+
+// ImageIcon — the photo counterpart of FilmIcon.
+export const ImageIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <circle cx="8.5" cy="9.5" r="1.5" />
+    <path d="M21 16l-5-5-5 5-2-2-6 6" />
+  </Icon>
+);
+
+// TopicsIcon — stacked threads, used for a forum group's topic list.
+export const TopicsIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M4 6h16" />
+    <path d="M4 12h16" />
+    <path d="M4 18h10" />
+  </Icon>
+);
+
+// DownloadIcon — "open the original file" in the image viewer.
+export const DownloadIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M12 3v12" />
+    <path d="M7 11l5 5 5-5" />
+    <path d="M4 20h16" />
+  </Icon>
+);

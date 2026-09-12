@@ -130,7 +130,7 @@ export function AlertStrip({
 
 // MoreFooter is the shared "load more / all loaded" footer under an infinite
 // list. Takes the three fields it needs rather than a query object, so it works
-// with every page's own Page type. The empty case belongs to VideoGrid.
+// with every page's own Page type. The empty case belongs to MediaGrid.
 export function MoreFooter({
   hasNextPage,
   isFetchingNextPage,

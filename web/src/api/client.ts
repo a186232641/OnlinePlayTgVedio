@@ -46,9 +46,22 @@ export interface Channel {
   title: string;
   username?: string;
   video_count: number;
+  photo_count: number;
   last_indexed_at?: string;
   group_by_streamer: boolean;
   auto_sync: boolean;
+
+  // Forum shape. `dialog_kind` is "channel" | "megagroup" | "topic";
+  // `is_forum` marks a group whose content lives in topics, and a topic row
+  // carries `topic_id` + `parent_channel_id`. A topic IS a channel row, so the
+  // channel detail route renders both.
+  dialog_kind: "channel" | "megagroup" | "topic";
+  is_forum: boolean;
+  topic_count: number;
+  topic_id?: number;
+  parent_channel_id?: number;
+  topic_closed?: boolean;
+  topics_synced_at?: string;
 }
 
 export interface Streamer {
@@ -74,6 +87,45 @@ export interface Video {
   text: string;
   stream_url: string;
 }
+
+// MediaItem is one row of a merged video+image list. `kind` decides how it is
+// opened: a video navigates to the player, an image opens the lightbox.
+export interface MediaItem {
+  kind: "video" | "photo";
+  id: number;
+  channel_id: number;
+  tg_msg_id: number;
+  date?: string;
+  from?: string;
+  file_name?: string;
+  file_size: number;
+  media_type?: string;
+  mime_type?: string;
+  duration_seconds: number;
+  width: number;
+  height: number;
+  text: string;
+  url: string;       // stream URL (video) / full image URL (photo)
+  thumb_url: string;
+}
+
+// MediaCursor is the two-part keyset cursor of a merged list: videos and images
+// are separate tables with separate id sequences, so each side carries its own
+// position (see internal/db/media.go).
+export interface MediaCursor {
+  video?: number;
+  photo?: number;
+}
+
+export interface MediaPage {
+  items: MediaItem[];
+  next: MediaCursor;
+  has_more: boolean;
+  total_videos?: number;
+  total_photos?: number;
+}
+
+export type MediaKindFilter = "" | "video" | "photo";
 
 export interface TgSession {
   id: number;
