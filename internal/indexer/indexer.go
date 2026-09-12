@@ -85,7 +85,12 @@ func (i *Indexer) discover(ctx context.Context, sessionID int64) error {
 	// (群组/megagroup, incl. forum groups whose topics we browse). Basic groups
 	// (InputPeerChat) and private chats/bots (InputPeerUser) are intentionally
 	// skipped — they are not browsable media sources here.
-	return query.GetDialogs(raw).BatchSize(100).ForEach(ctx, func(ctx context.Context, e dialogs.Elem) error {
+	//
+	// Forum groups stay dialog_kind='megagroup' with is_forum=TRUE; their topics
+	// are enumerated afterwards (a nested pagination inside this walk would hold
+	// the dialog cursor open for the whole crawl).
+	var forums []*db.Channel
+	err = query.GetDialogs(raw).BatchSize(100).ForEach(ctx, func(ctx context.Context, e dialogs.Elem) error {
 		p, ok := e.Peer.(*tg.InputPeerChannel)
 		if !ok {
 			return nil
@@ -94,13 +99,11 @@ func (i *Indexer) discover(ctx context.Context, sessionID int64) error {
 		if !ok {
 			return nil
 		}
-		// Forums are flattened to megagroup at discovery; per-topic child rows
-		// are populated by the (separate) topic-discovery path.
 		kind := db.DialogKindChannel
 		if ch.Megagroup || ch.Forum {
 			kind = db.DialogKindMegagroup
 		}
-		_, err := i.db.UpsertChannel(ctx, &db.Channel{
+		row := &db.Channel{
 			UserID:      userID,
 			TGSessionID: sessionID,
 			TGChannelID: ch.ID,
@@ -108,10 +111,27 @@ func (i *Indexer) discover(ctx context.Context, sessionID int64) error {
 			Title:       ch.Title,
 			Username:    ch.Username,
 			DialogKind:  kind,
-		})
+			IsForum:     ch.Forum,
+		}
+		id, err := i.db.UpsertChannel(ctx, row)
 		if err != nil {
 			return fmt.Errorf("upsert channel %d: %w", ch.ID, err)
 		}
+		if ch.Forum {
+			row.ID = id
+			forums = append(forums, row)
+		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	for _, f := range forums {
+		if _, err := i.discoverTopics(ctx, raw, f); err != nil {
+			// One unreadable forum must not abort the whole discovery run.
+			slog.Warn("discover topics failed", "channel_id", f.ID, "title", f.Title, "err", err)
+		}
+	}
+	return nil
 }

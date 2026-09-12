@@ -25,9 +25,21 @@ type channelDTO struct {
 	Title           string `json:"title"`
 	Username        string `json:"username,omitempty"`
 	VideoCount      int    `json:"video_count"`
+	PhotoCount      int    `json:"photo_count"`
 	LastIndexedAt   string `json:"last_indexed_at,omitempty"`
 	GroupByStreamer bool   `json:"group_by_streamer"`
 	AutoSync        bool   `json:"auto_sync"`
+
+	// Forum/topic shape. DialogKind is "channel" | "megagroup" | "topic";
+	// IsForum marks a megagroup whose content lives in topics, and TopicCount is
+	// how many of them we know about.
+	DialogKind      string `json:"dialog_kind"`
+	IsForum         bool   `json:"is_forum"`
+	TopicCount      int64  `json:"topic_count"`
+	TopicID         int32  `json:"topic_id,omitempty"`
+	ParentChannelID int64  `json:"parent_channel_id,omitempty"`
+	TopicClosed     bool   `json:"topic_closed,omitempty"`
+	TopicsSyncedAt  string `json:"topics_synced_at,omitempty"`
 }
 
 func channelToDTO(c db.Channel) channelDTO {
@@ -38,11 +50,24 @@ func channelToDTO(c db.Channel) channelDTO {
 		Title:           c.Title,
 		Username:        c.Username,
 		VideoCount:      c.VideoCount,
+		PhotoCount:      c.PhotoCount,
 		GroupByStreamer: c.GroupByStreamer,
 		AutoSync:        c.AutoSync,
+		DialogKind:      c.DialogKind,
+		IsForum:         c.IsForum,
+		TopicClosed:     c.TopicClosed,
 	}
 	if c.LastIndexedAt != nil {
 		dto.LastIndexedAt = c.LastIndexedAt.Format("2006-01-02T15:04:05Z07:00")
+	}
+	if c.TopicsSyncedAt != nil {
+		dto.TopicsSyncedAt = c.TopicsSyncedAt.Format("2006-01-02T15:04:05Z07:00")
+	}
+	if c.TopicID != nil {
+		dto.TopicID = *c.TopicID
+	}
+	if c.ParentChannelID != nil {
+		dto.ParentChannelID = *c.ParentChannelID
 	}
 	return dto
 }
@@ -63,7 +88,113 @@ func (h *ChannelsHandlers) Get(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.Errorf(http.StatusNotFound, "not_found", "channel not found"))
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"channel": channelToDTO(*c)})
+	dto := channelToDTO(*c)
+	if c.IsForum {
+		if n, err := h.DB.CountTopics(r.Context(), c.ID, uid); err == nil {
+			dto.TopicCount = n
+		}
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"channel": dto})
+}
+
+// Topics lists a forum group's topics.
+//
+// GET /api/channels/:id/topics
+func (h *ChannelsHandlers) Topics(w http.ResponseWriter, r *http.Request) {
+	uid, _ := web.UserIDFromContext(r.Context())
+	cid, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		httpx.WriteError(w, httpx.Errorf(http.StatusBadRequest, "bad_id", "invalid channel id"))
+		return
+	}
+	if _, err := h.DB.ChannelByID(r.Context(), cid, uid); err != nil {
+		httpx.WriteError(w, httpx.Errorf(http.StatusNotFound, "not_found", "channel not found"))
+		return
+	}
+	topics, err := h.DB.ListTopics(r.Context(), cid, uid)
+	if err != nil {
+		httpx.WriteError(w, err)
+		return
+	}
+	out := make([]channelDTO, 0, len(topics))
+	for _, t := range topics {
+		out = append(out, channelToDTO(t))
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"topics": out})
+}
+
+// TopicsRefresh re-enumerates a forum group's topics from Telegram. Cheap
+// (a couple of RPCs) and safe to repeat — it only upserts the topic rows.
+//
+// POST /api/channels/:id/topics/refresh
+func (h *ChannelsHandlers) TopicsRefresh(w http.ResponseWriter, r *http.Request) {
+	uid, _ := web.UserIDFromContext(r.Context())
+	cid, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		httpx.WriteError(w, httpx.Errorf(http.StatusBadRequest, "bad_id", "invalid channel id"))
+		return
+	}
+	if h.Indexer == nil {
+		httpx.WriteError(w, httpx.Errorf(http.StatusServiceUnavailable, "no_indexer", "indexer not wired"))
+		return
+	}
+	n, err := h.Indexer.RefreshTopics(r.Context(), cid, uid)
+	if err != nil {
+		httpx.WriteError(w, httpx.Errorf(http.StatusBadGateway, "topics_failed", err.Error()))
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "topics": n})
+}
+
+// Backfill re-arms the full-history walk and starts a sync.
+//
+// Needed after a feature widens what sync stores (images, for instance): a
+// channel that already finished its backfill has history_complete=TRUE, so a
+// normal sync only pulls new messages at the top and the older images would
+// never arrive.
+//
+// POST /api/channels/:id/backfill
+func (h *ChannelsHandlers) Backfill(w http.ResponseWriter, r *http.Request) {
+	uid, _ := web.UserIDFromContext(r.Context())
+	cid, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		httpx.WriteError(w, httpx.Errorf(http.StatusBadRequest, "bad_id", "invalid channel id"))
+		return
+	}
+	ch, err := h.DB.ChannelByID(r.Context(), cid, uid)
+	if err != nil {
+		httpx.WriteError(w, httpx.Errorf(http.StatusNotFound, "not_found", "channel not found"))
+		return
+	}
+	if h.Indexer == nil {
+		httpx.WriteError(w, httpx.Errorf(http.StatusServiceUnavailable, "no_indexer", "syncer not wired"))
+		return
+	}
+	// A forum group holds no messages itself — re-arm each of its topics.
+	targets := []int64{cid}
+	if ch.IsForum {
+		topics, err := h.DB.ListTopics(r.Context(), cid, uid)
+		if err != nil {
+			httpx.WriteError(w, err)
+			return
+		}
+		targets = targets[:0]
+		for _, t := range topics {
+			targets = append(targets, t.ID)
+		}
+	}
+	for _, id := range targets {
+		if err := h.DB.ResetHistoryComplete(r.Context(), id); err != nil {
+			httpx.WriteError(w, err)
+			return
+		}
+	}
+	st, err := h.Indexer.SyncStart(r.Context(), cid, uid)
+	if err != nil {
+		httpx.WriteError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, st)
 }
 
 // UpdateChannel patches mutable per-channel settings (currently just the
@@ -110,7 +241,13 @@ func (h *ChannelsHandlers) UpdateChannel(w http.ResponseWriter, r *http.Request)
 		httpx.WriteError(w, httpx.Errorf(http.StatusNotFound, "not_found", "channel not found"))
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"channel": channelToDTO(*c)})
+	dto := channelToDTO(*c)
+	if c.IsForum {
+		if n, err := h.DB.CountTopics(r.Context(), c.ID, uid); err == nil {
+			dto.TopicCount = n
+		}
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"channel": dto})
 }
 
 type streamerDTO struct {
@@ -161,15 +298,23 @@ func (h *ChannelsHandlers) List(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, err)
 		return
 	}
+	// One grouped query instead of a COUNT per row.
+	topicCounts, err := h.DB.TopicCounts(r.Context(), uid)
+	if err != nil {
+		httpx.WriteError(w, err)
+		return
+	}
 	out := make([]channelDTO, 0, len(chs))
 	for _, c := range chs {
-		// Only broadcast channels and supergroups are browsable. Basic groups,
-		// private chats/bots, and raw forum/topic rows are hidden — even if older
-		// rows of those kinds still linger from before discovery was narrowed.
+		// Only broadcast channels and supergroups are browsable at this level.
+		// Topic rows are reached through their group's topic list instead, and
+		// basic groups / private chats stay hidden.
 		if c.DialogKind != db.DialogKindChannel && c.DialogKind != db.DialogKindMegagroup {
 			continue
 		}
-		out = append(out, channelToDTO(c))
+		dto := channelToDTO(c)
+		dto.TopicCount = topicCounts[c.ID]
+		out = append(out, dto)
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"channels": out})
 }
@@ -278,11 +423,16 @@ func (h *ChannelsHandlers) ClearVideos(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, err)
 		return
 	}
+	photos, err := h.DB.DeletePhotosByChannel(r.Context(), uid, cid)
+	if err != nil {
+		httpx.WriteError(w, err)
+		return
+	}
 	// Re-arm the backfill: without this the channel keeps history_complete=TRUE
 	// and the next sync skips Phase B entirely, so the wiped history never returns.
 	_ = h.DB.ResetHistoryComplete(r.Context(), cid)
 	_ = h.DB.MarkChannelIndexed(r.Context(), cid)
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": n})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": n + photos, "videos": n, "photos": photos})
 }
 
 func (h *ChannelsHandlers) ChannelVideos(w http.ResponseWriter, r *http.Request) {

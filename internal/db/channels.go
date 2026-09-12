@@ -11,10 +11,12 @@ import (
 const (
 	DialogKindChannel   = "channel"
 	DialogKindMegagroup = "megagroup"
-	DialogKindForum     = "forum" // megagroup with forum=true; only its topics are indexable
-	DialogKindTopic     = "topic"
-	DialogKindGroup     = "group"
-	DialogKindUser      = "user"
+	// DialogKindTopic is one forum topic, stored as a child row of its
+	// megagroup. A forum group itself stays DialogKindMegagroup and carries
+	// is_forum=TRUE.
+	DialogKindTopic  = "topic"
+	DialogKindGroup  = "group"
+	DialogKindUser   = "user"
 )
 
 const (
@@ -44,6 +46,17 @@ type Channel struct {
 	GroupByStreamer bool
 	HistoryComplete bool
 	AutoSync        bool
+
+	// Forum/topic fields. IsForum marks a megagroup whose messages are split
+	// into topics — it stays dialog_kind='megagroup' so existing list filters
+	// keep working; the topics themselves are dialog_kind='topic' child rows
+	// (parent_channel_id + topic_id, see migration 0002).
+	IsForum          bool
+	PhotoCount       int
+	TopicsSyncedAt   *time.Time
+	TopicIconColor   *int32
+	TopicIconEmojiID *int64
+	TopicClosed      bool
 }
 
 // All columns are qualified with the c.* alias because some queries
@@ -54,7 +67,9 @@ const channelCols = `
     COALESCE(c.username, ''), COALESCE(c.photo_path, ''),
     c.dialog_kind, c.parent_channel_id, c.topic_id,
     c.index_enabled, COALESCE(c.index_status, 'idle'), COALESCE(c.index_error, ''),
-    c.video_count, c.last_indexed_at, c.group_by_streamer, c.history_complete, c.auto_sync
+    c.video_count, c.last_indexed_at, c.group_by_streamer, c.history_complete, c.auto_sync,
+    c.is_forum, c.photo_count, c.topics_synced_at,
+    c.topic_icon_color, c.topic_icon_emoji_id, c.topic_closed
 `
 
 func scanChannel(row pgx.Row) (*Channel, error) {
@@ -65,6 +80,8 @@ func scanChannel(row pgx.Row) (*Channel, error) {
 		&c.DialogKind, &c.ParentChannelID, &c.TopicID,
 		&c.IndexEnabled, &c.IndexStatus, &c.IndexError,
 		&c.VideoCount, &c.LastIndexedAt, &c.GroupByStreamer, &c.HistoryComplete, &c.AutoSync,
+		&c.IsForum, &c.PhotoCount, &c.TopicsSyncedAt,
+		&c.TopicIconColor, &c.TopicIconEmojiID, &c.TopicClosed,
 	); err != nil {
 		return nil, err
 	}
@@ -78,19 +95,25 @@ func (d *DB) UpsertChannel(ctx context.Context, c *Channel) (int64, error) {
 	row := d.QueryRow(ctx, `
         INSERT INTO channels (
             user_id, tg_session_id, tg_channel_id, access_hash, title, username,
-            dialog_kind, parent_channel_id, topic_id
+            dialog_kind, parent_channel_id, topic_id,
+            is_forum, topic_icon_color, topic_icon_emoji_id, topic_closed
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
         ON CONFLICT (tg_session_id, tg_channel_id, COALESCE(topic_id, 0)) DO UPDATE SET
-            access_hash       = EXCLUDED.access_hash,
-            title             = EXCLUDED.title,
-            username          = EXCLUDED.username,
-            dialog_kind       = EXCLUDED.dialog_kind,
-            parent_channel_id = EXCLUDED.parent_channel_id
+            access_hash         = EXCLUDED.access_hash,
+            title               = EXCLUDED.title,
+            username            = EXCLUDED.username,
+            dialog_kind         = EXCLUDED.dialog_kind,
+            parent_channel_id   = EXCLUDED.parent_channel_id,
+            is_forum            = EXCLUDED.is_forum,
+            topic_icon_color    = COALESCE(EXCLUDED.topic_icon_color, channels.topic_icon_color),
+            topic_icon_emoji_id = COALESCE(EXCLUDED.topic_icon_emoji_id, channels.topic_icon_emoji_id),
+            topic_closed        = EXCLUDED.topic_closed
         RETURNING id
     `,
 		c.UserID, c.TGSessionID, c.TGChannelID, c.AccessHash, c.Title, nilIfEmpty(c.Username),
 		c.DialogKind, c.ParentChannelID, c.TopicID,
+		c.IsForum, c.TopicIconColor, c.TopicIconEmojiID, c.TopicClosed,
 	)
 	var id int64
 	if err := row.Scan(&id); err != nil {
@@ -108,6 +131,7 @@ func (d *DB) MarkChannelIndexed(ctx context.Context, channelID int64) error {
 	_, err := d.Exec(ctx, `
         UPDATE channels
         SET video_count = (SELECT count(*) FROM videos WHERE channel_id=$1),
+            photo_count = (SELECT count(*) FROM photos WHERE channel_id=$1),
             last_indexed_at=NOW(),
             index_status='idle', index_error=NULL
         WHERE id=$1
@@ -288,4 +312,70 @@ func nilIfEmpty(s string) any {
 		return nil
 	}
 	return s
+}
+// ListTopics returns the forum topics of one megagroup (its dialog_kind='topic'
+// child rows), most recently active first. Topic rows carry the PARENT's
+// tg_channel_id and access_hash, so every peer-building/refresh path keeps
+// working on them unchanged.
+func (d *DB) ListTopics(ctx context.Context, parentID, userID int64) ([]Channel, error) {
+	rows, err := d.Query(ctx, `
+        SELECT `+channelCols+`
+        FROM channels c
+        WHERE c.parent_channel_id=$1 AND c.user_id=$2 AND c.dialog_kind=$3
+        ORDER BY c.last_indexed_at DESC NULLS LAST, c.topic_id
+    `, parentID, userID, DialogKindTopic)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Channel
+	for rows.Next() {
+		c, err := scanChannel(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *c)
+	}
+	return out, rows.Err()
+}
+
+// SetTopicsSynced stamps when a forum group's topic list was last enumerated,
+// and marks the group as a forum so the UI offers the topic drill-down.
+func (d *DB) SetTopicsSynced(ctx context.Context, channelID int64) error {
+	_, err := d.Exec(ctx, `UPDATE channels SET topics_synced_at=NOW(), is_forum=TRUE WHERE id=$1`, channelID)
+	return err
+}
+
+// CountTopics is the number of known topics under a forum group.
+func (d *DB) CountTopics(ctx context.Context, parentID, userID int64) (int64, error) {
+	var n int64
+	err := d.QueryRow(ctx, `
+        SELECT count(*) FROM channels
+        WHERE parent_channel_id=$1 AND user_id=$2 AND dialog_kind=$3
+    `, parentID, userID, DialogKindTopic).Scan(&n)
+	return n, err
+}
+
+// TopicCounts returns topic counts keyed by parent channel id for one user, so
+// the channel list can show "N 个话题" without a query per row.
+func (d *DB) TopicCounts(ctx context.Context, userID int64) (map[int64]int64, error) {
+	rows, err := d.Query(ctx, `
+        SELECT parent_channel_id, count(*)
+        FROM channels
+        WHERE user_id=$1 AND dialog_kind=$2 AND parent_channel_id IS NOT NULL
+        GROUP BY parent_channel_id
+    `, userID, DialogKindTopic)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]int64{}
+	for rows.Next() {
+		var parent, n int64
+		if err := rows.Scan(&parent, &n); err != nil {
+			return nil, err
+		}
+		out[parent] = n
+	}
+	return out, rows.Err()
 }

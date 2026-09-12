@@ -50,6 +50,13 @@ type Video struct {
 	// DCID is the data center the document lives on (0 = unknown). Used to route
 	// file transfers through the right per-DC connection pool.
 	DCID int
+
+	// ThumbSize is the PhotoSize.Type of the document thumbnail picked at sync
+	// time (empty = the document has no usable thumb, or the row predates
+	// thumbnails). ThumbPath is the already-downloaded thumb, relative to
+	// CACHE_DIR (empty = not fetched yet).
+	ThumbSize string
+	ThumbPath string
 }
 
 // All columns prefixed with v. so SELECT works even when the FROM clause
@@ -67,7 +74,8 @@ const videoCols = `
     COALESCE(v.duration_seconds, 0), COALESCE(v.width, 0), COALESCE(v.height, 0),
     COALESCE(v.text, ''), v.text_entities,
     COALESCE(v.tg_doc_id, 0), COALESCE(v.access_hash, 0), v.file_reference,
-    COALESCE(v.grouped_id, 0), COALESCE(v.dc_id, 0)
+    COALESCE(v.grouped_id, 0), COALESCE(v.dc_id, 0),
+    COALESCE(v.thumb_size, ''), COALESCE(v.thumb_path, '')
 `
 
 func scanVideo(row pgx.Row) (*Video, error) {
@@ -84,6 +92,7 @@ func scanVideo(row pgx.Row) (*Video, error) {
 		&v.Text, &v.TextEntities,
 		&v.TGDocID, &v.AccessHash, &v.FileReference,
 		&v.GroupedID, &v.DCID,
+		&v.ThumbSize, &v.ThumbPath,
 	); err != nil {
 		return nil, err
 	}
@@ -101,7 +110,7 @@ func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
             thumbnail, thumbnail_file_size,
             media_type, mime_type,
             duration_seconds, width, height,
-            text, text_entities, grouped_id, dc_id
+            text, text_entities, grouped_id, dc_id, thumb_size
         ) VALUES (
             $1,$2,
             $3,$4,$5,$6,
@@ -110,7 +119,7 @@ func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
             $12,$13,
             $14,$15,
             $16,$17,$18,
-            $19,$20,$21,$22
+            $19,$20,$21,$22,$23
         )
         ON CONFLICT (user_id, channel_id, tg_msg_id) DO UPDATE SET
             msg_type            = EXCLUDED.msg_type,
@@ -134,7 +143,9 @@ func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
             text_entities       = EXCLUDED.text_entities,
             grouped_id          = EXCLUDED.grouped_id,
             -- Keep a known DC if a later re-import (e.g. JSON) carries 0.
-            dc_id               = CASE WHEN EXCLUDED.dc_id > 0 THEN EXCLUDED.dc_id ELSE videos.dc_id END
+            dc_id               = CASE WHEN EXCLUDED.dc_id > 0 THEN EXCLUDED.dc_id ELSE videos.dc_id END,
+            -- Same for the thumb size: a JSON re-import has none, don't wipe it.
+            thumb_size          = COALESCE(EXCLUDED.thumb_size, videos.thumb_size)
         RETURNING id
     `,
 		v.UserID, v.ChannelID,
@@ -145,6 +156,7 @@ func (d *DB) UpsertVideo(ctx context.Context, v *Video) (int64, error) {
 		nilIfEmpty(v.MediaType), nilIfEmpty(v.MimeType),
 		v.DurationSeconds, v.Width, v.Height,
 		nilIfEmpty(v.Text), v.TextEntities, nilIfZero64(v.GroupedID), v.DCID,
+		nilIfEmpty(v.ThumbSize),
 	)
 	var id int64
 	if err := row.Scan(&id); err != nil {
@@ -188,8 +200,9 @@ func (d *DB) PropagateGroupCaption(ctx context.Context, userID, channelID, group
 }
 
 // UpdateVideoLocator persists the TG streaming locator after first refresh.
-// FileSize is overwritten only when newSize > 0; same for mime_type and dc_id.
-func (d *DB) UpdateVideoLocator(ctx context.Context, id int64, tgDocID, accessHash int64, fr []byte, newSize int64, newMime string, dcID int) error {
+// FileSize is overwritten only when newSize > 0; same for mime_type, dc_id and
+// thumb_size.
+func (d *DB) UpdateVideoLocator(ctx context.Context, id int64, tgDocID, accessHash int64, fr []byte, newSize int64, newMime string, dcID int, thumbSize string) error {
 	_, err := d.Exec(ctx, `
         UPDATE videos SET
             tg_doc_id      = $2,
@@ -197,9 +210,17 @@ func (d *DB) UpdateVideoLocator(ctx context.Context, id int64, tgDocID, accessHa
             file_reference = $4,
             file_size      = CASE WHEN $5 > 0 THEN $5 ELSE file_size END,
             mime_type      = COALESCE(NULLIF($6, ''), mime_type),
-            dc_id          = CASE WHEN $7 > 0 THEN $7 ELSE dc_id END
+            dc_id          = CASE WHEN $7 > 0 THEN $7 ELSE dc_id END,
+            thumb_size     = COALESCE(NULLIF($8, ''), thumb_size)
         WHERE id=$1
-    `, id, tgDocID, accessHash, fr, newSize, newMime, dcID)
+    `, id, tgDocID, accessHash, fr, newSize, newMime, dcID, thumbSize)
+	return err
+}
+
+// SetVideoThumbPath records the on-disk thumbnail (relative to CACHE_DIR) after
+// it has been fetched from Telegram. Empty path clears it (thumb file lost).
+func (d *DB) SetVideoThumbPath(ctx context.Context, id int64, path string) error {
+	_, err := d.Exec(ctx, `UPDATE videos SET thumb_path=$2 WHERE id=$1`, id, nilIfEmpty(path))
 	return err
 }
 
@@ -212,35 +233,10 @@ func (d *DB) CountVideosByChannel(ctx context.Context, userID, channelID int64) 
 	return n, nil
 }
 
-// MaxTGMsgID returns the largest tg_msg_id stored for a channel — TG sync
-// uses it to skip messages we've already imported and only fetch newer ones.
-// Returns 0 when the channel is empty.
-func (d *DB) MaxTGMsgID(ctx context.Context, channelID, userID int64) (int64, error) {
-	row := d.QueryRow(ctx, `
-        SELECT COALESCE(MAX(tg_msg_id), 0) FROM videos
-        WHERE channel_id=$1 AND user_id=$2
-    `, channelID, userID)
-	var n int64
-	if err := row.Scan(&n); err != nil {
-		return 0, err
-	}
-	return n, nil
-}
-
-// MinTGMsgID returns the smallest tg_msg_id stored for a channel — resumable
-// sync uses it as the backfill cursor (fetch messages older than this).
-// Returns 0 when the channel is empty.
-func (d *DB) MinTGMsgID(ctx context.Context, channelID, userID int64) (int64, error) {
-	row := d.QueryRow(ctx, `
-        SELECT COALESCE(MIN(tg_msg_id), 0) FROM videos
-        WHERE channel_id=$1 AND user_id=$2
-    `, channelID, userID)
-	var n int64
-	if err := row.Scan(&n); err != nil {
-		return 0, err
-	}
-	return n, nil
-}
+// The per-channel sync cursors used to live here as MaxTGMsgID/MinTGMsgID over
+// the videos table alone. They now span videos+photos and live in media.go
+// (MaxMsgIDForChannel / MinMsgIDForChannel) — a videos-only cursor would make
+// an incremental sync re-walk everything newer than the last *video*.
 
 func (d *DB) DeleteVideosByChannel(ctx context.Context, userID, channelID int64) (int64, error) {
 	tag, err := d.Exec(ctx, `DELETE FROM videos WHERE user_id=$1 AND channel_id=$2`, userID, channelID)
@@ -287,17 +283,25 @@ func orderColumn(orderBy string) (col string, asc bool) {
 // tie-breaker in the same direction so the (col, id) tuple is a total order,
 // which the keyset cursor relies on. NULLS LAST keeps captionless/undated rows
 // at the tail in both directions.
-func orderClause(orderBy string) string {
+func orderClause(orderBy string) string { return orderClauseOn("v", orderBy, true) }
+
+// orderClauseOn is orderClause for an arbitrary alias/table. hasDuration=false
+// (photos) maps the duration key onto the default date ordering, since the
+// table has no duration column.
+func orderClauseOn(alias, orderBy string, hasDuration bool) string {
 	col, asc := orderColumn(orderBy)
 	if col == "" {
+		if !hasDuration {
+			return " ORDER BY " + alias + ".date DESC NULLS LAST, " + alias + ".id DESC"
+		}
 		// duration (or unknown non-date/name) — keep the legacy clause.
-		return " ORDER BY v.duration_seconds DESC, v.id DESC"
+		return " ORDER BY " + alias + ".duration_seconds DESC, " + alias + ".id DESC"
 	}
 	dir := "DESC"
 	if asc {
 		dir = "ASC"
 	}
-	return " ORDER BY v." + col + " " + dir + " NULLS LAST, v.id " + dir
+	return " ORDER BY " + alias + "." + col + " " + dir + " NULLS LAST, " + alias + ".id " + dir
 }
 
 // keysetCursor builds the WHERE condition for "rows after the boundary row
@@ -312,16 +316,26 @@ func orderClause(orderBy string) string {
 // composite (col, id) keyset below fixes that for date and file_name ordering;
 // duration keeps the simple id cursor (not frontend-paginated).
 func keysetCursor(orderBy, p string) string {
+	return keysetCursorOn("videos", "v", orderBy, p, true)
+}
+
+// keysetCursorOn is keysetCursor for an arbitrary table/alias. hasDuration
+// mirrors orderClauseOn: a table without a duration column (photos) falls back
+// to the date keyset instead of the legacy plain-id cursor.
+func keysetCursorOn(table, alias, orderBy, p string, hasDuration bool) string {
 	col, asc := orderColumn(orderBy)
 	if col == "" {
-		return "v.id < $" + p
+		if hasDuration {
+			return alias + ".id < $" + p
+		}
+		col, asc = "date", false
 	}
 	cmp := "<"
 	if asc {
 		cmp = ">"
 	}
-	c := "v." + col
-	cur := "(SELECT " + col + " FROM videos WHERE id = $" + p + ")"
+	c := alias + "." + col
+	cur := "(SELECT " + col + " FROM " + table + " WHERE id = $" + p + ")"
 	// Boundary in the NULL tail ⇒ only later NULLs (by id, same direction).
 	// Otherwise: strictly past the boundary value, the tie broken by id, plus
 	// the whole NULL tail (which sorts after any non-NULL value).

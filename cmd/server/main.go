@@ -15,6 +15,7 @@ import (
 	"github.com/hanfeilong/onlineplaytgvideo/internal/config"
 	"github.com/hanfeilong/onlineplaytgvideo/internal/db"
 	"github.com/hanfeilong/onlineplaytgvideo/internal/indexer"
+	"github.com/hanfeilong/onlineplaytgvideo/internal/media"
 	"github.com/hanfeilong/onlineplaytgvideo/internal/tglogin"
 	"github.com/hanfeilong/onlineplaytgvideo/internal/tgmanager"
 	"github.com/hanfeilong/onlineplaytgvideo/internal/video"
@@ -61,6 +62,9 @@ func main() {
 	cacheMgr.RefreshLocator = func(ctx context.Context, v *db.Video) error {
 		return video.RefreshFileReference(ctx, database, tgMgr, v)
 	}
+	cacheMgr.RefreshPhotoLocator = func(ctx context.Context, p *db.Photo) error {
+		return video.RefreshPhotoReference(ctx, database, tgMgr, p)
+	}
 	if err := cacheMgr.Start(rootCtx); err != nil {
 		slog.Error("cache start failed", "err", err)
 		os.Exit(1)
@@ -68,6 +72,7 @@ func main() {
 	defer cacheMgr.Stop()
 
 	stream := &video.StreamServer{Cfg: cfg, DB: database, TG: tgMgr, Cache: cacheMgr}
+	mediaSrv := &media.Server{Cfg: cfg, DB: database, TG: tgMgr, Cache: cacheMgr}
 
 	loginMgr := tglogin.NewManager(cfg, database, func(uid, sid int64) {
 		if err := tgMgr.Start(context.Background(), uid, sid); err != nil {
@@ -86,6 +91,13 @@ func main() {
 		StreamHandler: stream.Handler(),
 		OnFavAdd:      cacheMgr.EnqueueFavorite,
 		OnFavRemove:   cacheMgr.HandleUnfavorite,
+
+		OnPhotoFavAdd:    cacheMgr.EnqueuePhotoFavorite,
+		OnPhotoFavRemove: cacheMgr.HandlePhotoUnfavorite,
+
+		PhotoFileHandler:  mediaSrv.PhotoFileHandler(),
+		PhotoThumbHandler: mediaSrv.PhotoThumbHandler(),
+		VideoThumbHandler: mediaSrv.VideoThumbHandler(),
 	})
 
 	srv := &http.Server{

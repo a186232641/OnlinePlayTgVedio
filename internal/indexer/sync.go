@@ -12,6 +12,7 @@ import (
 	"github.com/gotd/td/tg"
 
 	"github.com/hanfeilong/onlineplaytgvideo/internal/db"
+	"github.com/hanfeilong/onlineplaytgvideo/internal/tgmedia"
 )
 
 // SyncState is per-channel sync progress, kept in memory only.
@@ -21,8 +22,11 @@ type SyncState struct {
 	// Walked is the number of messages scanned (video or not); Imported/Skipped
 	// move live as we write, because sync now streams to the DB batch by batch
 	// instead of buffering the whole history first.
-	Walked     int       `json:"walked"`
-	Imported   int       `json:"imported"`
+	Walked   int `json:"walked"`
+	Imported int `json:"imported"`
+	// Videos/Photos break Imported down by media kind (they always sum to it).
+	Videos     int       `json:"videos"`
+	Photos     int       `json:"photos"`
 	Skipped    int       `json:"skipped"`
 	LastError  string    `json:"last_error,omitempty"`
 	StartedAt  time.Time `json:"started_at,omitempty"`
@@ -70,8 +74,82 @@ func (i *Indexer) SyncStart(parentCtx context.Context, channelID, userID int64) 
 	i.syncs[channelID] = st
 	i.syncMu.Unlock()
 
+	// A forum group has no browsable history of its own — every message belongs
+	// to a topic. Syncing it means "refresh the topic list, then sync each
+	// topic", which is what runForumSync does.
+	if ch.IsForum && ch.DialogKind != db.DialogKindTopic {
+		go i.runForumSync(ch, cli.API, st)
+		return st.snapshot(), nil
+	}
 	go i.runSync(ch, cli.API, st)
 	return st.snapshot(), nil
+}
+
+// runForumSync re-enumerates a forum group's topics and then syncs them one by
+// one, aggregating their counters onto the group's own sync state so the UI can
+// watch a single progress line. Topics are synced sequentially on purpose: they
+// all share one TG session, and parallel history walks are the fastest way to
+// earn a FLOOD_WAIT.
+func (i *Indexer) runForumSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Hour)
+	defer cancel()
+	defer func() {
+		st.update(func(s *SyncState) {
+			s.Running = false
+			s.Phase = ""
+			s.FinishedAt = time.Now()
+		})
+		_ = i.db.MarkChannelIndexed(ctx, ch.ID)
+	}()
+
+	st.update(func(s *SyncState) { s.Phase = "topics" })
+	if _, err := i.discoverTopics(ctx, api, ch); err != nil {
+		slog.Warn("forum sync: topic discovery failed", "channel_id", ch.ID, "err", err)
+		st.update(func(s *SyncState) { s.LastError = "枚举话题失败: " + err.Error() })
+		return
+	}
+	topics, err := i.db.ListTopics(ctx, ch.ID, ch.UserID)
+	if err != nil {
+		st.update(func(s *SyncState) { s.LastError = err.Error() })
+		return
+	}
+	if len(topics) == 0 {
+		st.update(func(s *SyncState) { s.LastError = "该群组没有话题(或话题对当前账号不可见)" })
+		return
+	}
+
+	for idx := range topics {
+		if ctx.Err() != nil {
+			break
+		}
+		t := topics[idx]
+		st.update(func(s *SyncState) {
+			s.Phase = fmt.Sprintf("话题 %d/%d: %s", idx+1, len(topics), t.Title)
+		})
+
+		// Reuse the per-channel sync entry so the topic's own detail page shows
+		// live progress too; skip a topic that is already being synced manually.
+		i.syncMu.Lock()
+		if cur, ok := i.syncs[t.ID]; ok && cur.snapshot().Running {
+			i.syncMu.Unlock()
+			continue
+		}
+		sub := &syncEntry{state: SyncState{Running: true, StartedAt: time.Now()}}
+		i.syncs[t.ID] = sub
+		i.syncMu.Unlock()
+
+		i.runSync(&t, api, sub) // synchronous: one topic at a time
+
+		snap := sub.snapshot()
+		st.update(func(s *SyncState) {
+			s.Walked += snap.Walked
+			s.Imported += snap.Imported
+			s.Videos += snap.Videos
+			s.Photos += snap.Photos
+			s.Skipped += snap.Skipped
+		})
+	}
+	slog.Info("forum sync done", "channel_id", ch.ID, "topics", len(topics))
 }
 
 func (i *Indexer) SyncStatus(channelID int64) SyncState {
@@ -96,13 +174,13 @@ func (i *Indexer) runSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
 		_ = i.db.MarkChannelIndexed(ctx, ch.ID)
 	}()
 
-	peer, err := inputPeerForChannel(ch)
+	fetch, err := i.fetcherFor(api, ch)
 	if err != nil {
 		st.update(func(s *SyncState) { s.LastError = err.Error() })
 		return
 	}
 
-	maxSeen64, _ := i.db.MaxTGMsgID(ctx, ch.ID, ch.UserID)
+	maxSeen64, _ := i.db.MaxMsgIDForChannel(ctx, ch.ID, ch.UserID)
 	maxSeen := int(maxSeen64)
 	slog.Info("sync start",
 		"channel_id", ch.ID, "title", ch.Title,
@@ -112,7 +190,7 @@ func (i *Indexer) runSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
 	// Probe: a single getHistory call. 0 messages almost always means the
 	// access_hash is stale or we lost membership — bail with a clear message
 	// instead of silently walking nothing.
-	probe, perr := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{Peer: peer, Limit: 1})
+	probe, perr := fetch(ctx, 0, 0, 1)
 	if perr != nil {
 		slog.Warn("sync probe failed", "channel_id", ch.ID, "err", perr)
 		st.update(func(s *SyncState) { s.LastError = "probe: " + perr.Error() })
@@ -130,7 +208,7 @@ func (i *Indexer) runSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
 	// Phase A — incremental: pull messages newer than maxSeen (top of history).
 	// Skipped when the channel is empty; the backfill below covers that case.
 	if maxSeen > 0 {
-		if _, err := i.walkHistory(ctx, api, peer, ch, st, 0, maxSeen); err != nil {
+		if _, err := i.walkHistory(ctx, fetch, ch, st, 0, maxSeen); err != nil {
 			i.reportSyncErr(ch, st, "incremental", err)
 			return
 		}
@@ -140,8 +218,8 @@ func (i *Indexer) runSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
 	// batches, until we hit the very bottom. Resumable: progress is written as
 	// we go, and MIN(tg_msg_id) is the cursor next time. Skipped once complete.
 	if !ch.HistoryComplete {
-		minSeen64, _ := i.db.MinTGMsgID(ctx, ch.ID, ch.UserID)
-		bottom, err := i.walkHistory(ctx, api, peer, ch, st, int(minSeen64), 0)
+		minSeen64, _ := i.db.MinMsgIDForChannel(ctx, ch.ID, ch.UserID)
+		bottom, err := i.walkHistory(ctx, fetch, ch, st, int(minSeen64), 0)
 		if err != nil {
 			i.reportSyncErr(ch, st, "backfill", err)
 			return
@@ -185,7 +263,7 @@ func (i *Indexer) reportSyncErr(ch *db.Channel, st *syncEntry, phase string, err
 // progress that the next run resumes from. Returns reachedBottom=true when
 // history is exhausted (an empty page), false when stopped at a bound / error.
 func (i *Indexer) walkHistory(
-	ctx context.Context, api *tg.Client, peer tg.InputPeerClass,
+	ctx context.Context, fetch pageFetcher,
 	ch *db.Channel, st *syncEntry, startOffsetID, minID int,
 ) (bool, error) {
 	const pageSize = 100
@@ -201,12 +279,7 @@ func (i *Indexer) walkHistory(
 		default:
 		}
 
-		resp, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
-			Peer:     peer,
-			OffsetID: offsetID,
-			MinID:    minID,
-			Limit:    pageSize,
-		})
+		resp, err := fetch(ctx, offsetID, minID, pageSize)
 		if err != nil {
 			return false, err
 		}
@@ -249,25 +322,100 @@ func (i *Indexer) walkHistory(
 	}
 }
 
-// writeMsg upserts one message's video (if it has one), updating live counters.
+// writeMsg upserts one message's media (video or photo, whichever it carries),
+// updating live counters. Messages with neither are counted as skipped.
 func (i *Indexer) writeMsg(ctx context.Context, ch *db.Channel, m *tg.Message, st *syncEntry) error {
-	v := videoFromTGMessage(ch, m)
-	if v == nil {
-		st.update(func(s *SyncState) { s.Skipped++ })
+	if v := videoFromTGMessage(ch, m); v != nil {
+		if _, err := i.db.UpsertVideo(ctx, v); err != nil {
+			return fmt.Errorf("upsert video msg %d: %w", m.ID, err)
+		}
+		// Album member: spread the group's caption onto its silent siblings so all
+		// of them are searchable, not just the one message that carried the text.
+		if v.GroupedID != 0 {
+			if err := i.db.PropagateGroupCaption(ctx, ch.UserID, ch.ID, v.GroupedID); err != nil {
+				return fmt.Errorf("propagate caption grp %d: %w", v.GroupedID, err)
+			}
+		}
+		st.update(func(s *SyncState) {
+			s.Imported++
+			s.Videos++
+		})
 		return nil
 	}
-	if _, err := i.db.UpsertVideo(ctx, v); err != nil {
-		return fmt.Errorf("upsert msg %d: %w", m.ID, err)
-	}
-	// Album member: spread the group's caption onto its silent siblings so all
-	// of them are searchable, not just the one message that carried the text.
-	if v.GroupedID != 0 {
-		if err := i.db.PropagateGroupCaption(ctx, ch.UserID, ch.ID, v.GroupedID); err != nil {
-			return fmt.Errorf("propagate caption grp %d: %w", v.GroupedID, err)
+	if p := photoFromTGMessage(ch, m); p != nil {
+		if _, err := i.db.UpsertPhoto(ctx, p); err != nil {
+			return fmt.Errorf("upsert photo msg %d: %w", m.ID, err)
 		}
+		if p.GroupedID != 0 {
+			if err := i.db.PropagatePhotoGroupCaption(ctx, ch.UserID, ch.ID, p.GroupedID); err != nil {
+				return fmt.Errorf("propagate photo caption grp %d: %w", p.GroupedID, err)
+			}
+		}
+		st.update(func(s *SyncState) {
+			s.Imported++
+			s.Photos++
+		})
+		return nil
 	}
-	st.update(func(s *SyncState) { s.Imported++ })
+	st.update(func(s *SyncState) { s.Skipped++ })
 	return nil
+}
+
+// photoFromTGMessage maps an image message to a db.Photo. Returns nil when the
+// message carries no photo.
+//
+// Both MessageMediaPhoto and a document with an image mime can show up; only
+// the former is a real Telegram photo (with the size ladder we serve from).
+// Image *documents* (someone sending a .png "as file") stay out of both tables
+// for now — they are rare and would need the document locator path.
+func photoFromTGMessage(ch *db.Channel, msg *tg.Message) *db.Photo {
+	media, ok := msg.Media.(*tg.MessageMediaPhoto)
+	if !ok {
+		return nil
+	}
+	pc, ok := media.GetPhoto()
+	if !ok {
+		return nil
+	}
+	photo, ok := pc.AsNotEmpty()
+	if !ok {
+		return nil
+	}
+	full, thumb := tgmedia.PickPhotoSizes(photo.Sizes)
+	if full.Type == "" {
+		return nil // nothing downloadable (stripped-only placeholder)
+	}
+
+	sentAt := time.Unix(int64(msg.Date), 0).UTC()
+	var edited *time.Time
+	if msg.EditDate != 0 {
+		t := time.Unix(int64(msg.EditDate), 0).UTC()
+		edited = &t
+	}
+
+	return &db.Photo{
+		UserID:    ch.UserID,
+		ChannelID: ch.ID,
+
+		TGMsgID:   int64(msg.ID),
+		MsgType:   "message",
+		Date:      &sentAt,
+		Edited:    edited,
+		FromName:  ch.Title,
+		FromID:    fmt.Sprintf("channel%d", ch.TGChannelID),
+		FileSize:  full.Bytes,
+		Width:     full.W,
+		Height:    full.H,
+		Text:      msg.Message,
+		GroupedID: msg.GroupedID,
+
+		TGPhotoID:     photo.ID,
+		AccessHash:    photo.AccessHash,
+		FileReference: photo.FileReference,
+		DCID:          photo.DCID,
+		SizeType:      full.Type,
+		ThumbSize:     thumb.Type,
+	}
 }
 
 // videoFromTGMessage maps a TG message to a db.Video, mirroring the JSON
@@ -352,6 +500,7 @@ func videoFromTGMessage(ch *db.Channel, msg *tg.Message) *db.Video {
 		AccessHash:    doc.AccessHash,
 		FileReference: doc.FileReference,
 		DCID:          doc.DCID,
+		ThumbSize:     tgmedia.PickDocThumb(doc.Thumbs),
 	}
 }
 
@@ -368,6 +517,53 @@ func hasVideoExt(name string) bool {
 		}
 	}
 	return false
+}
+
+// pageFetcher pulls one page of messages newest→oldest: strictly below
+// offsetID (0 = start at the newest message) and strictly above minID (0 =
+// unbounded). Abstracting it is what lets one walk serve both a whole channel
+// and a single forum topic.
+type pageFetcher func(ctx context.Context, offsetID, minID, limit int) (tg.MessagesMessagesClass, error)
+
+// fetcherFor picks the right history API for a channel row.
+//
+// Plain channels/groups page through messages.getHistory. A forum topic is not
+// a peer of its own — its messages live in the parent group's history — so it
+// pages through messages.search with top_msg_id set to the topic id. The filter
+// is deliberately InputMessagesFilterEmpty rather than PhotoVideo: a lot of
+// channels post videos as plain documents with a generic mime type, which the
+// PhotoVideo filter drops server-side and which videoFromTGMessage's extension
+// fallback is there to catch.
+func (i *Indexer) fetcherFor(api *tg.Client, ch *db.Channel) (pageFetcher, error) {
+	peer, err := inputPeerForChannel(ch)
+	if err != nil {
+		return nil, err
+	}
+	if ch.DialogKind == db.DialogKindTopic {
+		if ch.TopicID == nil {
+			return nil, fmt.Errorf("话题 %d 缺少 topic_id,请在群组页重新拉取话题列表", ch.ID)
+		}
+		topicID := int(*ch.TopicID)
+		return func(ctx context.Context, offsetID, minID, limit int) (tg.MessagesMessagesClass, error) {
+			return api.MessagesSearch(ctx, &tg.MessagesSearchRequest{
+				Peer:     peer,
+				Q:        "",
+				Filter:   &tg.InputMessagesFilterEmpty{},
+				TopMsgID: topicID,
+				OffsetID: offsetID,
+				MinID:    minID,
+				Limit:    limit,
+			})
+		}, nil
+	}
+	return func(ctx context.Context, offsetID, minID, limit int) (tg.MessagesMessagesClass, error) {
+		return api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+			Peer:     peer,
+			OffsetID: offsetID,
+			MinID:    minID,
+			Limit:    limit,
+		})
+	}, nil
 }
 
 func inputPeerForChannel(c *db.Channel) (tg.InputPeerClass, error) {

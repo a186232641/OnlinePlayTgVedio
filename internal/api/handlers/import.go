@@ -34,6 +34,8 @@ type tdMessage struct {
 	From              string          `json:"from"`
 	FromID            string          `json:"from_id"`
 	File              string          `json:"file"`
+	Photo             string          `json:"photo"`           // 图片消息:导出里的相对路径
+	PhotoFileSize     json.RawMessage `json:"photo_file_size"` // 新版导出才有
 	FileName          string          `json:"file_name"`
 	FileSize          json.RawMessage `json:"file_size"` // number or quoted string
 	Thumbnail         string          `json:"thumbnail"`
@@ -117,6 +119,11 @@ func parseTime(unixStr, isoStr string) *time.Time {
 // media_type or mime (rare but happens, especially for forwarded files).
 var videoExts = []string{".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".flv", ".ts", ".mpeg", ".mpg", ".3gp"}
 
+// isPhoto: TG Desktop writes a "photo" path for image messages (and no "file").
+func (m *tdMessage) isPhoto() bool {
+	return m.Photo != "" || m.MediaType == "photo"
+}
+
 func (m *tdMessage) isVideo() bool {
 	switch m.MediaType {
 	case "video_file", "video_message", "animation":
@@ -187,7 +194,37 @@ func (h *ChannelsHandlers) Import(w http.ResponseWriter, r *http.Request) {
 	imported, skipped := 0, 0
 	skipBy := map[string]int{} // media_type → count, helps user see what's missing
 	emptyRef := []byte{}
+	photos := 0
 	for _, m := range exp.Messages {
+		if m.Type == "message" && !m.isVideo() && m.isPhoto() {
+			p := &db.Photo{
+				UserID:    uid,
+				ChannelID: cid,
+
+				TGMsgID:      int64(m.ID),
+				MsgType:      m.Type,
+				Date:         parseTime(m.DateUnix, m.Date),
+				Edited:       parseTime(m.EditedUnix, m.Edited),
+				FromName:     m.From,
+				FromID:       m.FromID,
+				File:         m.Photo,
+				FileSize:     parseFileSize(m.PhotoFileSize),
+				Width:        m.Width,
+				Height:       m.Height,
+				Text:         captionFromText(m.Text),
+				TextEntities: m.TextEntities,
+
+				// No locator in the export — resolved from TG on first view,
+				// exactly like a JSON-imported video is on first play.
+				FileReference: emptyRef,
+			}
+			if _, err := h.DB.UpsertPhoto(r.Context(), p); err != nil {
+				httpx.WriteError(w, fmt.Errorf("upsert photo msg=%d: %w", m.ID, err))
+				return
+			}
+			photos++
+			continue
+		}
 		if m.Type != "message" || !m.isVideo() {
 			skipped++
 			key := m.MediaType
@@ -243,6 +280,7 @@ func (h *ChannelsHandlers) Import(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"ok":         true,
 		"imported":   imported,
+		"photos":     photos,
 		"skipped":    skipped,
 		"total":      len(exp.Messages),
 		"skip_by":    skipBy, // breakdown so user sees if something useful was filtered

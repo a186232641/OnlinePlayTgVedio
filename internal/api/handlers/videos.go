@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -44,33 +43,30 @@ func (h *VideosHandlers) Get(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *VideosHandlers) Thumb(w http.ResponseWriter, r *http.Request) {
+// GetPhoto returns one image's metadata plus whether it is favorited.
+//
+// GET /api/photos/:id
+func (h *VideosHandlers) GetPhoto(w http.ResponseWriter, r *http.Request) {
 	uid, _ := web.UserIDFromContext(r.Context())
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
-		httpx.WriteError(w, httpx.Errorf(http.StatusBadRequest, "bad_id", "invalid video id"))
+		httpx.WriteError(w, httpx.Errorf(http.StatusBadRequest, "bad_id", "invalid photo id"))
 		return
 	}
-	v, err := h.DB.VideoByID(r.Context(), id, uid)
+	p, err := h.DB.PhotoByID(r.Context(), id, uid)
 	if err != nil {
-		httpx.WriteError(w, httpx.Errorf(http.StatusNotFound, "not_found", "video not found"))
+		if err == db.ErrNotFound {
+			httpx.WriteError(w, httpx.Errorf(http.StatusNotFound, "not_found", "photo not found"))
+			return
+		}
+		httpx.WriteError(w, err)
 		return
 	}
-	if v.Thumbnail == "" {
-		httpx.WriteError(w, httpx.Errorf(http.StatusNotFound, "no_thumb", "no thumbnail available"))
-		return
-	}
-	// Prevent traversal: thumbnail path is repo-controlled (set by indexer), but
-	// be defensive.
-	clean := filepath.Clean(v.Thumbnail)
-	if strings.HasPrefix(clean, "..") || strings.ContainsRune(clean, ':') {
-		httpx.WriteError(w, httpx.Errorf(http.StatusBadRequest, "bad_path", "invalid thumb path"))
-		return
-	}
-	abs := filepath.Join(h.Cfg.CacheDir, clean)
-	w.Header().Set("Content-Type", "image/jpeg")
-	w.Header().Set("Cache-Control", "public, max-age=86400")
-	http.ServeFile(w, r, abs)
+	fav, _ := h.DB.IsPhotoFavorite(r.Context(), uid, id)
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"photo":    photoToMediaDTO(*p),
+		"favorite": fav,
+	})
 }
 
 // Search supports any subset of these query params:

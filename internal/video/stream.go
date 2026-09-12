@@ -86,9 +86,9 @@ func (s *StreamServer) Handler() http.HandlerFunc {
 
 		// Fast path: cached file present, complete, and the right size.
 		if v.TGDocID != 0 {
-			if path, ok := s.Cache.CompletePathFor(r.Context(), v.TGDocID); ok {
+			if path, ok := s.Cache.CompletePathFor(r.Context(), db.MediaKindVideo, v.TGDocID); ok {
 				if fi, statErr := os.Stat(path); statErr == nil && (v.FileSize <= 0 || fi.Size() == v.FileSize) {
-					s.Cache.Touch(r.Context(), v.TGDocID)
+					s.Cache.Touch(r.Context(), db.MediaKindVideo, v.TGDocID)
 					// Mirror the from-Telegram Content-Type; ServeFile would
 					// otherwise sniff the extensionless .bin and can hand iOS
 					// Safari the wrong type for non-MP4 containers.
@@ -105,7 +105,7 @@ func (s *StreamServer) Handler() http.HandlerFunc {
 				// the browser. Drop it and fall through to streaming from TG.
 				slog.Warn("cached file failed integrity check, re-streaming",
 					"video_id", v.ID, "tg_doc_id", v.TGDocID, "want_size", v.FileSize)
-				s.Cache.InvalidateCorrupt(r.Context(), v.TGDocID)
+				s.Cache.InvalidateCorrupt(r.Context(), db.MediaKindVideo, v.TGDocID)
 			}
 		}
 

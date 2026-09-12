@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestScanVideoFiles(t *testing.T) {
+func TestScanCacheDir(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name string, n int) {
 		t.Helper()
@@ -22,7 +22,7 @@ func TestScanVideoFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	files, total, err := scanVideoFiles(dir)
+	files, total, err := scanCacheDir("video", dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,15 +31,15 @@ func TestScanVideoFiles(t *testing.T) {
 	}
 	got := map[int64]int64{}
 	for _, f := range files {
-		got[f.DocID] = f.Bytes
+		got[f.Key.id] = f.Bytes
 	}
 	if got[100] != 3 || got[200] != 7 {
 		t.Fatalf("unexpected files: %#v", got)
 	}
 }
 
-func TestScanVideoFilesMissingDirectory(t *testing.T) {
-	files, total, err := scanVideoFiles(filepath.Join(t.TempDir(), "missing"))
+func TestScanCacheDirMissingDirectory(t *testing.T) {
+	files, total, err := scanCacheDir("video", filepath.Join(t.TempDir(), "missing"))
 	if err != nil {
 		t.Fatal(err)
 	}

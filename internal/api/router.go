@@ -17,14 +17,21 @@ import (
 )
 
 type Deps struct {
-	Cfg           *config.Config
-	DB            *db.DB
-	Login         *tglogin.Manager
-	Indexer       *indexer.Indexer
-	TGMgr         *tgmanager.Manager
-	OnFavAdd      func(userID, videoID int64)
-	OnFavRemove   func(userID, videoID int64)
-	StreamHandler http.HandlerFunc
+	Cfg              *config.Config
+	DB               *db.DB
+	Login            *tglogin.Manager
+	Indexer          *indexer.Indexer
+	TGMgr            *tgmanager.Manager
+	OnFavAdd         func(userID, videoID int64)
+	OnFavRemove      func(userID, videoID int64)
+	OnPhotoFavAdd    func(userID, photoID int64)
+	OnPhotoFavRemove func(userID, photoID int64)
+	StreamHandler    http.HandlerFunc
+	// Media file handlers come from internal/media (they need the TG client and
+	// the cache), wired in main.go the same way StreamHandler is.
+	PhotoFileHandler  http.HandlerFunc
+	PhotoThumbHandler http.HandlerFunc
+	VideoThumbHandler http.HandlerFunc
 }
 
 func NewRouter(d Deps) http.Handler {
@@ -42,7 +49,10 @@ func NewRouter(d Deps) http.Handler {
 	tgH := &handlers.TGLoginHandlers{DB: database, Login: d.Login, TGMgr: d.TGMgr, Indexer: d.Indexer}
 	chH := &handlers.ChannelsHandlers{DB: database, Indexer: d.Indexer}
 	vidH := &handlers.VideosHandlers{Cfg: cfg, DB: database}
-	favH := &handlers.FavoritesHandlers{DB: database, OnAdd: d.OnFavAdd, OnRemove: d.OnFavRemove}
+	favH := &handlers.FavoritesHandlers{
+		DB: database, OnAdd: d.OnFavAdd, OnRemove: d.OnFavRemove,
+		OnPhotoAdd: d.OnPhotoFavAdd, OnPhotoRemove: d.OnPhotoFavRemove,
+	}
 
 	r.Route("/api", func(r chi.Router) {
 		r.Route("/auth", func(r chi.Router) {
@@ -79,15 +89,35 @@ func NewRouter(d Deps) http.Handler {
 				r.Get("/{id}/videos", chH.ChannelVideos)
 				r.Delete("/{id}/videos", chH.ClearVideos)
 				r.Get("/{id}/streamers", chH.Streamers)
+				r.Get("/{id}/media", chH.ChannelMedia)
+				r.Get("/{id}/topics", chH.Topics)
+				r.Post("/{id}/topics/refresh", chH.TopicsRefresh)
 				r.Post("/{id}/import", chH.Import)
 				r.Post("/{id}/sync", chH.SyncStart)
 				r.Get("/{id}/sync", chH.SyncStatus)
+				r.Post("/{id}/backfill", chH.Backfill)
+			})
+
+			r.Route("/media", func(r chi.Router) {
+				r.Get("/search", chH.MediaSearch)
+			})
+
+			r.Route("/photos", func(r chi.Router) {
+				r.Get("/{id}", vidH.GetPhoto)
+				if d.PhotoFileHandler != nil {
+					r.Get("/{id}/file", d.PhotoFileHandler)
+				}
+				if d.PhotoThumbHandler != nil {
+					r.Get("/{id}/thumb", d.PhotoThumbHandler)
+				}
 			})
 
 			r.Route("/videos", func(r chi.Router) {
 				r.Get("/search", vidH.Search)
 				r.Get("/{id}", vidH.Get)
-				r.Get("/{id}/thumb", vidH.Thumb)
+				if d.VideoThumbHandler != nil {
+					r.Get("/{id}/thumb", d.VideoThumbHandler)
+				}
 				if d.StreamHandler != nil {
 					r.Get("/{id}/stream", d.StreamHandler)
 				}
@@ -96,6 +126,7 @@ func NewRouter(d Deps) http.Handler {
 			r.Route("/favorites", func(r chi.Router) {
 				r.Get("/", favH.List)
 				r.Post("/", favH.Add)
+				r.Delete("/photo/{id}", favH.RemovePhoto)
 				r.Delete("/{video_id}", favH.Remove)
 			})
 		})
