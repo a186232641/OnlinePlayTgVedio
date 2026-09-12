@@ -127,6 +127,27 @@ export interface MediaPage {
 
 export type MediaKindFilter = "" | "video" | "photo";
 
+// SyncState mirrors indexer.SyncState. `phase` is "syncing" for a plain
+// channel/topic and "topics" / "话题 3/12: …" while a forum group fans out.
+export interface SyncState {
+  running: boolean;
+  phase?: string;
+  walked: number;
+  imported: number;
+  videos: number;
+  photos: number;
+  skipped: number;
+  last_error?: string;
+  started_at?: string;
+  finished_at?: string;
+}
+
+// A topic is a channel row; the list endpoint attaches its live sync state so
+// the page can poll one URL instead of one per topic.
+export interface Topic extends Channel {
+  sync?: SyncState;
+}
+
 export interface TgSession {
   id: number;
   phone?: string;

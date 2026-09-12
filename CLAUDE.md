@@ -88,6 +88,12 @@ re-fetches a message (`refresh.go`, the cache downloader) works on a topic row u
 forum group (`runForumSync`) re-enumerates its topics and then syncs them **sequentially** — they
 share one TG session, and parallel history walks are the shortest path to a FLOOD_WAIT.
 
+Because a topic row *is* a channel row, `POST /channels/{topicID}/sync` syncs one topic on its own,
+which is the normal way to use this: a group can hold dozens of topics with hundreds of thousands
+of messages each, so the group-level "sync everything" is the batch option, not the only one. The
+topic list endpoint attaches each topic's live `SyncState` to its row (`topicDTO`) so the page
+polls one URL instead of one per topic.
+
 **Photos live in their own table.** `photos` mirrors `videos` column for column (same TG-export
 naming, same lazily-resolved locator idea) but the locator is a *photo* locator
 (`tg.InputPhotoFileLocation`: photo id + access_hash + file_reference + a size letter), which is a

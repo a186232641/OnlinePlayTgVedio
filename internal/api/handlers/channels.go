@@ -97,6 +97,14 @@ func (h *ChannelsHandlers) Get(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"channel": dto})
 }
 
+// topicDTO is a topic's channel row plus its live sync state, so the topic list
+// can show per-topic progress by polling ONE endpoint. Asking for each topic's
+// status separately would mean a request per row on every page load.
+type topicDTO struct {
+	channelDTO
+	Sync *indexer.SyncState `json:"sync,omitempty"`
+}
+
 // Topics lists a forum group's topics.
 //
 // GET /api/channels/:id/topics
@@ -116,9 +124,18 @@ func (h *ChannelsHandlers) Topics(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, err)
 		return
 	}
-	out := make([]channelDTO, 0, len(topics))
+	out := make([]topicDTO, 0, len(topics))
 	for _, t := range topics {
-		out = append(out, channelToDTO(t))
+		dto := topicDTO{channelDTO: channelToDTO(t)}
+		if h.Indexer != nil {
+			// Sync state is in-memory and per channel id; a topic is a channel
+			// row, so this is the same lookup the detail page does.
+			if st := h.Indexer.SyncStatus(t.ID); st.Running || !st.FinishedAt.IsZero() || st.LastError != "" {
+				s := st
+				dto.Sync = &s
+			}
+		}
+		out = append(out, dto)
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"topics": out})
 }
