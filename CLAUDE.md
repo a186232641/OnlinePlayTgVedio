@@ -130,7 +130,13 @@ re-runs sync. That is the migration path for images in channels synced before im
   newer than what we have; **Phase B backfill** = `OffsetID=MIN(tg_msg_id)` walks older history to
   the very bottom, then sets `channels.history_complete` so later sweeps skip the backfill. Write
   order doesn't matter — queries sort by `date`. A probe call first flags "stale access_hash / lost
-  membership" (0 messages). **Writes are batched per page** (`pageWrite` / `flushPage`): a page's
+  membership" (0 messages). One run is bounded by `SYNC_RUN_TIMEOUT` (env, default **24h**, `0`/
+  `off` = unlimited) and each individual page by `pageTimeout` (2 min, retried) — the per-page
+  bound is the real protection against a wedged connection, so the overall one can be generous.
+  It was a hard-coded 30 minutes, which a million-message channel hit every single round.
+  Hitting either limit is **not** an error: progress is already persisted, and `SyncState.Note`
+  (informational) says so — distinct from `SyncState.LastError` (an actual failure), because the
+  two used to share a field and a timeout was being shown to users as "已是最新?". **Writes are batched per page** (`pageWrite` / `flushPage`): a page's
   videos, its photos and its distinct album-caption propagations go out as three pgx batches — one
   network round trip each — instead of one (often two) per message. On a million-message channel
   that is the difference between hours and days; the round trips were never Telegram's fault. pgx

@@ -209,7 +209,7 @@ function TopicCard({ topic }: { topic: Topic }) {
     topic.photo_count > 0 && `${topic.photo_count.toLocaleString()} 图片`,
   ].filter(Boolean) as string[];
   const err = topic.sync?.last_error;
-  const upToDate = !!err?.startsWith("已是最新");
+  const note = topic.sync?.note;
 
   return (
     <div className="card flex flex-col gap-3 p-4">
@@ -238,16 +238,16 @@ function TopicCard({ topic }: { topic: Topic }) {
         </div>
       )}
       {!running && err && (
+        <div className="truncate text-theme-xs text-error-600 dark:text-error-400" title={err}>
+          上次同步失败: {err}
+        </div>
+      )}
+      {!running && !err && note && (
         <div
-          className={
-            "truncate text-theme-xs " +
-            (upToDate
-              ? "text-blue-light-600 dark:text-blue-light-400"
-              : "text-error-600 dark:text-error-400")
-          }
-          title={err}
+          className="truncate text-theme-xs text-blue-light-600 dark:text-blue-light-400"
+          title={note}
         >
-          {upToDate ? err : `上次同步: ${err}`}
+          {note}
         </div>
       )}
 

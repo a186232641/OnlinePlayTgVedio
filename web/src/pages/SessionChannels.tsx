@@ -25,6 +25,7 @@ interface SyncState {
   videos: number;
   photos: number;
   skipped: number;
+  note?: string;
   last_error?: string;
   started_at?: string;
   finished_at?: string;
@@ -208,7 +209,7 @@ function ChannelRow({
   });
   const isSyncing = !!sync.data?.running;
   const lastError = sync.data?.last_error;
-  const upToDate = !!lastError?.startsWith("已是最新");
+  const note = sync.data?.note;
 
   const autoSync = useMutation({
     mutationFn: (val: boolean) => api.patch(`/api/channels/${c.id}`, { auto_sync: val }),
@@ -247,15 +248,18 @@ function ChannelRow({
         )}
         {!isSyncing && lastError && (
           <div
-            className={
-              "mt-1 truncate text-theme-xs " +
-              (upToDate
-                ? "text-blue-light-600 dark:text-blue-light-400"
-                : "text-error-600 dark:text-error-400")
-            }
+            className="mt-1 truncate text-theme-xs text-error-600 dark:text-error-400"
             title={lastError}
           >
-            {upToDate ? lastError : `上次同步失败: ${lastError}`}
+            上次同步失败: {lastError}
+          </div>
+        )}
+        {!isSyncing && !lastError && note && (
+          <div
+            className="mt-1 truncate text-theme-xs text-blue-light-600 dark:text-blue-light-400"
+            title={note}
+          >
+            {note}
           </div>
         )}
       </div>

@@ -27,7 +27,12 @@ type SyncState struct {
 	// Videos/Photos break Imported down by media kind (they always sum to it).
 	Videos     int       `json:"videos"`
 	Photos     int       `json:"photos"`
-	Skipped    int       `json:"skipped"`
+	Skipped int `json:"skipped"`
+	// Note is informational ("up to date", "hit the time limit, progress saved");
+	// LastError is an actual failure. Keeping them apart matters because the UI
+	// colours them differently — they used to share one field, which is how a
+	// timeout ended up being reported to the user as "已是最新?".
+	Note       string    `json:"note,omitempty"`
 	LastError  string    `json:"last_error,omitempty"`
 	StartedAt  time.Time `json:"started_at,omitempty"`
 	FinishedAt time.Time `json:"finished_at,omitempty"`
@@ -91,7 +96,10 @@ func (i *Indexer) SyncStart(parentCtx context.Context, channelID, userID int64) 
 // all share one TG session, and parallel history walks are the fastest way to
 // earn a FLOOD_WAIT.
 func (i *Indexer) runForumSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Hour)
+	// No deadline of its own: every topic it calls runs under runCtx, so the
+	// loop is already bounded by (topics × SYNC_RUN_TIMEOUT) — and when that is
+	// unlimited, walking every topic to the end is exactly what was asked for.
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	defer func() {
 		st.update(func(s *SyncState) {
@@ -114,7 +122,7 @@ func (i *Indexer) runForumSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
 		return
 	}
 	if len(topics) == 0 {
-		st.update(func(s *SyncState) { s.LastError = "该群组没有话题(或话题对当前账号不可见)" })
+		st.update(func(s *SyncState) { s.Note = "该群组没有话题(或话题对当前账号不可见)" })
 		return
 	}
 
@@ -161,8 +169,19 @@ func (i *Indexer) SyncStatus(channelID int64) SyncState {
 	return SyncState{}
 }
 
+// runCtx builds the context for one sync run. SYNC_RUN_TIMEOUT == 0 means no
+// overall deadline: progress is persisted page by page, so the only thing a
+// deadline buys is protection against a wedged run holding its slot — and the
+// per-page timeout in fetchPage covers that far more precisely.
+func (i *Indexer) runCtx() (context.Context, context.CancelFunc) {
+	if i.cfg.SyncRunTimeout > 0 {
+		return context.WithTimeout(context.Background(), i.cfg.SyncRunTimeout)
+	}
+	return context.WithCancel(context.Background())
+}
+
 func (i *Indexer) runSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	ctx, cancel := i.runCtx()
 	defer cancel()
 	defer func() {
 		st.update(func(s *SyncState) {
@@ -233,7 +252,7 @@ func (i *Indexer) runSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
 
 	snap := st.snapshot()
 	if snap.Imported == 0 && snap.Skipped == 0 && ch.HistoryComplete {
-		st.update(func(s *SyncState) { s.LastError = "已是最新(没有新消息)" })
+		st.update(func(s *SyncState) { s.Note = "已是最新,没有新消息" })
 	}
 	slog.Info("sync done",
 		"channel_id", ch.ID,
@@ -249,7 +268,7 @@ func (i *Indexer) reportSyncErr(ch *db.Channel, st *syncEntry, phase string, err
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		slog.Info("sync interrupted (will resume next run)", "channel_id", ch.ID, "phase", phase)
 		st.update(func(s *SyncState) {
-			s.LastError = "已是最新? 本轮同步达时间上限,已保存进度,下次会从断点继续"
+			s.Note = "本轮达到 SYNC_RUN_TIMEOUT 时间上限,进度已保存,下次从断点继续"
 		})
 		return
 	}
@@ -279,7 +298,7 @@ func (i *Indexer) walkHistory(
 		default:
 		}
 
-		resp, err := fetch(ctx, offsetID, minID, pageSize)
+		resp, err := fetchPage(ctx, fetch, offsetID, minID, pageSize)
 		if err != nil {
 			return false, err
 		}
@@ -553,6 +572,54 @@ func hasVideoExt(name string) bool {
 		}
 	}
 	return false
+}
+
+const (
+	// pageTimeout bounds ONE history page. Without it a hung connection is only
+	// caught by the run deadline, which is now hours long (or unlimited), so a
+	// single wedged call could stall a whole sync.
+	pageTimeout = 2 * time.Minute
+	// pageAttempts/pageRetryBackoff retry a page that timed out client-side.
+	// Real API errors are not retried here — the tgmw middlewares already do
+	// that for the transient ones.
+	pageAttempts     = 3
+	pageRetryBackoff = 2 * time.Second
+)
+
+// fetchPage runs one page fetch under its own deadline, retrying a client-side
+// timeout a couple of times. A cancelled/expired RUN context is propagated
+// as-is so the caller reports "interrupted, resumes next round" rather than a
+// failure.
+func fetchPage(ctx context.Context, fetch pageFetcher, offsetID, minID, limit int) (tg.MessagesMessagesClass, error) {
+	var lastErr error
+	for attempt := 0; attempt < pageAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if attempt > 0 {
+			select {
+			case <-time.After(pageRetryBackoff):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		pageCtx, cancel := context.WithTimeout(ctx, pageTimeout)
+		resp, err := fetch(pageCtx, offsetID, minID, limit)
+		cancel()
+		if err == nil {
+			return resp, nil
+		}
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, cerr // the run itself ended, not just this page
+		}
+		lastErr = err
+		if !errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		slog.Warn("history page timed out, retrying",
+			"offset_id", offsetID, "attempt", attempt+1)
+	}
+	return nil, lastErr
 }
 
 // pageFetcher pulls one page of messages newest→oldest: strictly below

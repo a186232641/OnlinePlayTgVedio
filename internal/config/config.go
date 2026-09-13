@@ -29,6 +29,16 @@ type Config struct {
 	// TG sync for every already-synced channel. 0 disables auto-sync.
 	SyncInterval time.Duration
 
+	// SyncRunTimeout bounds ONE sync run of ONE channel/topic. It exists only so
+	// a wedged run can't hold its slot forever — progress is written as the walk
+	// pages, so hitting it is never data loss, just a resume next round. 0 = no
+	// overall limit (individual Telegram calls are still bounded).
+	//
+	// It used to be a hard-coded 30 minutes, which a million-message channel hits
+	// every single round: the walk would stop, the user would see a scary
+	// message, and the backfill would only advance one slice per scheduler tick.
+	SyncRunTimeout time.Duration
+
 	// DCOverrides override Telegram DC addresses (gotd's built-in IPs go stale
 	// when Telegram rotates them). Parsed from TG_DC_OVERRIDES, applied on top
 	// of dcs.Prod() so the given IP is tried first for that DC.
@@ -98,6 +108,12 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("SYNC_INTERVAL: %w", err)
 	}
 	c.SyncInterval = si
+
+	rt, err := parseSyncInterval(env("SYNC_RUN_TIMEOUT", "24h"))
+	if err != nil {
+		return nil, fmt.Errorf("SYNC_RUN_TIMEOUT: %w", err)
+	}
+	c.SyncRunTimeout = rt
 
 	ov, err := parseDCOverrides(env("TG_DC_OVERRIDES", ""))
 	if err != nil {
@@ -173,7 +189,8 @@ func splitHostPort(addr string) (host, port string, ok bool) {
 }
 
 // parseSyncInterval accepts a Go duration ("30m", "1h", "90s"). Empty, "0", or
-// "off" disable the scheduler.
+// "off" mean "no interval" — for SYNC_INTERVAL that disables the scheduler, for
+// SYNC_RUN_TIMEOUT it means a run has no overall deadline.
 func parseSyncInterval(s string) (time.Duration, error) {
 	s = strings.TrimSpace(s)
 	if s == "" || s == "0" || strings.EqualFold(s, "off") {

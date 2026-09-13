@@ -103,7 +103,9 @@ docker compose -f deploy/docker-compose.yml --env-file .env up -d --build
 | `JWT_SECRET` | ✓ | 任意字符串 |
 | `MASTER_KEY` | ✓ | base64 编码的 32 字节随机密钥;**丢失则全员需重新绑定 TG** |
 | `CACHE_DIR` | | 默认 `/var/cache/tgvideo` |
-| `CACHE_CAP_GB` | | 默认 50 |
+| `CACHE_CAP_GB` | | 默认 50;其中 10%(下限 1GiB)留给缩略图 |
+| `SYNC_INTERVAL` | | 后台自动同步间隔,默认 `30m`;`0`/`off` 关闭 |
+| `SYNC_RUN_TIMEOUT` | | 单次同步总时长上限,默认 `24h`;`0`/`off` 不限时 |
 | `SERVER_ADDR` | | 默认 `:8080` |
 | `DOMAIN` | | Caddy auto-HTTPS 用 |
 
@@ -144,6 +146,8 @@ make compose-up  # docker compose up
 
 - **MASTER_KEY 必须妥善保管**。建议用密钥管理服务(KMS)或在备份中加密存储 —— 丢失意味着所有用户存储的 TG 会话变砖。
 - **首次索引可能数小时**。频道很多/历史很长时会触发 FLOOD_WAIT;`floodwait` 中间件会自动 sleep 然后重试。
+  百万级消息的频道,一轮同步跑不完属正常:进度按页持久化,达到 `SYNC_RUN_TIMEOUT`
+  只是本轮停下,下次(手动点或后台调度)从断点继续,不会重头再来。
 - **缓存 dedup 按 `tg_doc_id`**(全局唯一)。同一公开频道里被多个用户收藏的同一视频只占一份磁盘空间。
 - **不支持 CDN 文件**(`UploadFileCDNRedirect`)。极少数大文件可能走 CDN,这种情况下会返回 500;后续如有需要再增量支持 `getCdnFile` 流。
 - **不支持 SignUp 流程**。已注册的 TG 账号可绑定;新号请先用官方客户端创建。

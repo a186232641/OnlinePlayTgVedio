@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestParseDCOverrides(t *testing.T) {
 	t.Run("empty", func(t *testing.T) {
@@ -63,5 +66,25 @@ func TestParseDCOverrides(t *testing.T) {
 				t.Fatalf("expected error for %q", bad)
 			}
 		})
+	}
+}
+func TestSyncRunTimeoutParsing(t *testing.T) {
+	// Same parser as SYNC_INTERVAL, but 0/off means "no overall deadline" rather
+	// than "disabled" — a run is then bounded only by the per-page timeout.
+	cases := map[string]time.Duration{
+		"24h": 24 * time.Hour,
+		"90m": 90 * time.Minute,
+		"0":   0,
+		"off": 0,
+		"":    0,
+	}
+	for in, want := range cases {
+		got, err := parseSyncInterval(in)
+		if err != nil || got != want {
+			t.Errorf("parseSyncInterval(%q) = %v, %v; want %v", in, got, err, want)
+		}
+	}
+	if _, err := parseSyncInterval("nonsense"); err == nil {
+		t.Error("parseSyncInterval(nonsense) should fail rather than silently disable the limit")
 	}
 }

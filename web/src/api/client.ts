@@ -137,6 +137,10 @@ export interface SyncState {
   videos: number;
   photos: number;
   skipped: number;
+  // `note` is informational (up to date / hit the time limit, progress saved);
+  // `last_error` is an actual failure. They are separate fields so the UI can
+  // colour them differently.
+  note?: string;
   last_error?: string;
   started_at?: string;
   finished_at?: string;
