@@ -231,7 +231,7 @@ across its topics (`TopicStats` → `topic_video_count`/`topic_photo_count` on t
 merely having topics: discovery enumerates the topics of every forum the account has joined,
 synced or not, so a "has topics" check lists groups nobody ever pulled a message from.
 
-Favorites span every channel and topic, so the favorites response carries a `sources` side map
+Favorites and media search span every channel and topic, so their responses carry a `sources` side map
 (channel id → title, plus the parent group for a topic; `ChannelSources`) and the grid renders a
 "来自 群组 › 话题" line with links to both levels. It's a per-page map rather than fields on each
 item because a page usually comes from a handful of channels. In `MediaGrid` those links sit

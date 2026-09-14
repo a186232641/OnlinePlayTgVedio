@@ -67,7 +67,7 @@ export function Search() {
     queryFn: () => api.get("/api/channels/"),
   });
 
-  const { query: result, items: all } = useMediaPages(
+  const { query: result, items: all, sources } = useMediaPages(
     ["search", submitted],
     () => {
       const qs = new URLSearchParams();
@@ -181,6 +181,7 @@ export function Search() {
 
           <MediaBrowser
             items={all}
+            sources={sources}
             emptyLabel="无匹配结果"
             linkTo={(m) => {
               const p = new URLSearchParams();

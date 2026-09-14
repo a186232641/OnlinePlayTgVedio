@@ -220,7 +220,13 @@ func (h *ChannelsHandlers) MediaSearch(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, err)
 		return
 	}
-	writeMediaPage(w, items, next, hasMore, nil)
+	// Results span channels and topics, same as favorites — label each origin.
+	sources, err := mediaSources(r, h.DB, uid, items)
+	if err != nil {
+		httpx.WriteError(w, err)
+		return
+	}
+	writeMediaPage(w, items, next, hasMore, map[string]any{"sources": sources})
 }
 
 // sourceDTO names where a media item came from. For a topic it also carries the
