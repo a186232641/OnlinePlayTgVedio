@@ -30,6 +30,14 @@ func (m MediaItem) id() int64 {
 	return m.Photo.ID
 }
 
+// ChannelID is the channel (or topic) row the item belongs to.
+func (m MediaItem) ChannelID() int64 {
+	if m.Video != nil {
+		return m.Video.ChannelID
+	}
+	return m.Photo.ChannelID
+}
+
 func (m MediaItem) date() *time.Time {
 	if m.Video != nil {
 		return m.Video.Date

@@ -58,6 +58,9 @@ export interface Channel {
   dialog_kind: "channel" | "megagroup" | "topic";
   is_forum: boolean;
   topic_count: number;
+  // Media summed across a forum group's topics (its own counts stay 0).
+  topic_video_count: number;
+  topic_photo_count: number;
   topic_id?: number;
   parent_channel_id?: number;
   topic_closed?: boolean;
@@ -117,12 +120,24 @@ export interface MediaCursor {
   photo?: number;
 }
 
+// MediaSource is where a media item came from. A topic also names its group,
+// so the UI can link to either level.
+export interface MediaSource {
+  id: number;
+  title: string;
+  dialog_kind: Channel["dialog_kind"];
+  parent_channel_id?: number;
+  parent_title?: string;
+}
+
 export interface MediaPage {
   items: MediaItem[];
   next: MediaCursor;
   has_more: boolean;
   total_videos?: number;
   total_photos?: number;
+  // Cross-channel lists (favorites) key each item's origin by channel_id.
+  sources?: Record<string, MediaSource>;
 }
 
 export type MediaKindFilter = "" | "video" | "photo";

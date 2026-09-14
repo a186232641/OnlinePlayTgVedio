@@ -36,6 +36,10 @@ type channelDTO struct {
 	DialogKind      string `json:"dialog_kind"`
 	IsForum         bool   `json:"is_forum"`
 	TopicCount      int64  `json:"topic_count"`
+	// TopicVideoCount/TopicPhotoCount sum the media across a forum group's
+	// topics (its own counters are 0 — the content lives one level down).
+	TopicVideoCount int64 `json:"topic_video_count"`
+	TopicPhotoCount int64 `json:"topic_photo_count"`
 	TopicID         int32  `json:"topic_id,omitempty"`
 	ParentChannelID int64  `json:"parent_channel_id,omitempty"`
 	TopicClosed     bool   `json:"topic_closed,omitempty"`
@@ -316,7 +320,7 @@ func (h *ChannelsHandlers) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// One grouped query instead of a COUNT per row.
-	topicCounts, err := h.DB.TopicCounts(r.Context(), uid)
+	topicStats, err := h.DB.TopicStats(r.Context(), uid)
 	if err != nil {
 		httpx.WriteError(w, err)
 		return
@@ -330,7 +334,11 @@ func (h *ChannelsHandlers) List(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		dto := channelToDTO(c)
-		dto.TopicCount = topicCounts[c.ID]
+		if st, ok := topicStats[c.ID]; ok {
+			dto.TopicCount = st.Topics
+			dto.TopicVideoCount = st.Videos
+			dto.TopicPhotoCount = st.Photos
+		}
 		out = append(out, dto)
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"channels": out})

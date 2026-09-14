@@ -222,3 +222,42 @@ func (h *ChannelsHandlers) MediaSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	writeMediaPage(w, items, next, hasMore, nil)
 }
+
+// sourceDTO names where a media item came from. For a topic it also carries the
+// forum group, so the UI can link to either level.
+type sourceDTO struct {
+	ID              int64  `json:"id"`
+	Title           string `json:"title"`
+	DialogKind      string `json:"dialog_kind"`
+	ParentChannelID int64  `json:"parent_channel_id,omitempty"`
+	ParentTitle     string `json:"parent_title,omitempty"`
+}
+
+// mediaSources resolves the distinct channels of a page, keyed by channel id.
+// It is a side map rather than fields on every item: a page of 120 favorites
+// usually comes from a handful of channels, so repeating titles per item would
+// only bloat the payload.
+func mediaSources(r *http.Request, database *db.DB, uid int64, items []db.MediaItem) (map[int64]sourceDTO, error) {
+	seen := map[int64]struct{}{}
+	ids := make([]int64, 0, 8)
+	for _, it := range items {
+		cid := it.ChannelID()
+		if _, ok := seen[cid]; ok {
+			continue
+		}
+		seen[cid] = struct{}{}
+		ids = append(ids, cid)
+	}
+	srcs, err := database.ChannelSources(r.Context(), uid, ids)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int64]sourceDTO, len(srcs))
+	for id, s := range srcs {
+		out[id] = sourceDTO{
+			ID: s.ID, Title: s.Title, DialogKind: s.DialogKind,
+			ParentChannelID: s.ParentID, ParentTitle: s.ParentTitle,
+		}
+	}
+	return out, nil
+}

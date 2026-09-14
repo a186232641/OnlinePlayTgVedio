@@ -1,7 +1,7 @@
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 
-import { api, MediaCursor, MediaItem, MediaPage } from "./client";
+import { api, MediaCursor, MediaItem, MediaPage, MediaSource } from "./client";
 
 export const MEDIA_PAGE_SIZE = 120;
 
@@ -35,6 +35,18 @@ export function useMediaPages(
     () => q.data?.pages.flatMap((p) => p.items) ?? [],
     [q.data],
   );
+  // Each page names only its own items' channels; merge them so every loaded
+  // item can resolve its origin.
+  const sources = useMemo<Record<string, MediaSource>>(
+    () => Object.assign({}, ...(q.data?.pages.map((p) => p.sources ?? {}) ?? [])),
+    [q.data],
+  );
   const first = q.data?.pages[0];
-  return { query: q, items, totalVideos: first?.total_videos, totalPhotos: first?.total_photos };
+  return {
+    query: q,
+    items,
+    sources,
+    totalVideos: first?.total_videos,
+    totalPhotos: first?.total_photos,
+  };
 }

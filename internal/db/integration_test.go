@@ -104,9 +104,14 @@ func TestIntegration(t *testing.T) {
 	if n, err := d.CountTopics(ctx, forumID, uid); err != nil || n != 1 {
 		t.Fatalf("CountTopics = %d, %v", n, err)
 	}
-	counts, err := d.TopicCounts(ctx, uid)
-	if err != nil || counts[forumID] != 1 {
-		t.Fatalf("TopicCounts = %v, %v", counts, err)
+	stats, err := d.TopicStats(ctx, uid)
+	if err != nil || stats[forumID].Topics != 1 {
+		t.Fatalf("TopicStats = %v, %v", stats, err)
+	}
+	// A forum whose topics hold nothing must report zero media — that is what
+	// keeps never-synced groups out of the browsing view.
+	if st := stats[forumID]; st.Videos != 0 || st.Photos != 0 {
+		t.Fatalf("unsynced forum reports media: %+v", st)
 	}
 	if ch, err := d.ChannelByID(ctx, forumID, uid); err != nil || !ch.IsForum || ch.TopicsSyncedAt == nil {
 		t.Fatalf("forum row: %+v %v", ch, err)
@@ -147,6 +152,29 @@ func TestIntegration(t *testing.T) {
 	}
 	if ch, _ := d.ChannelByID(ctx, topicID, uid); ch.VideoCount != 5 || ch.PhotoCount != 5 {
 		t.Fatalf("counts not recomputed: %d/%d", ch.VideoCount, ch.PhotoCount)
+	}
+
+	if st, _ := d.TopicStats(ctx, uid); st[forumID].Videos != 5 || st[forumID].Photos != 5 {
+		t.Fatalf("topic media not aggregated onto the group: %+v", st[forumID])
+	}
+
+	// Source lookup: a topic resolves to itself plus its parent group; ids that
+	// belong to someone else (or don't exist) are simply absent.
+	srcs, err := d.ChannelSources(ctx, uid, []int64{topicID, forumID, 999999})
+	if err != nil {
+		t.Fatal("ChannelSources:", err)
+	}
+	if got := srcs[topicID]; got.ParentID != forumID || got.ParentTitle != "群组" || got.DialogKind != DialogKindTopic {
+		t.Fatalf("topic source = %+v", got)
+	}
+	if got := srcs[forumID]; got.ParentID != 0 || got.Title != "群组" {
+		t.Fatalf("group source = %+v", got)
+	}
+	if _, ok := srcs[999999]; ok || len(srcs) != 2 {
+		t.Fatalf("unexpected sources: %+v", srcs)
+	}
+	if empty, err := d.ChannelSources(ctx, uid, nil); err != nil || len(empty) != 0 {
+		t.Fatalf("empty lookup = %v, %v", empty, err)
 	}
 
 	// sync cursors must span both tables

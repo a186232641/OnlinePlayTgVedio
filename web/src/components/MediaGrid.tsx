@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
-import { MediaItem } from "../api/client";
+import { MediaItem, MediaSource } from "../api/client";
 import { ClockIcon, ImageIcon, PlayIcon } from "./icons";
-import { EmptyState, cx } from "./ui";
+import { EmptyState } from "./ui";
 
 export function fmtDuration(s: number) {
   if (!s) return "";
@@ -57,15 +57,45 @@ function Thumb({ item }: { item: MediaItem }) {
 // Videos navigate to the player (via `linkTo`, which callers use to encode the
 // playlist context into the URL); images call `onOpenPhoto` so the page can put
 // them in the lightbox instead of leaving the list.
+// SourceLine links an item back to where it came from: "群组 › 话题" for a
+// topic (both parts clickable), just the title for a plain channel.
+function SourceLine({ src }: { src: MediaSource }) {
+  const link =
+    "truncate transition-colors hover:text-brand-600 dark:hover:text-brand-400";
+  return (
+    <div className="flex min-w-0 items-center gap-1 border-t border-gray-200 px-3 py-2 text-theme-xs text-gray-500 dark:border-gray-800 dark:text-gray-400">
+      <span className="shrink-0 text-gray-400">来自</span>
+      {src.dialog_kind === "topic" && src.parent_channel_id ? (
+        <>
+          <Link to={`/channels/${src.parent_channel_id}`} className={link} title={src.parent_title}>
+            {src.parent_title}
+          </Link>
+          <span className="shrink-0 text-gray-300 dark:text-gray-600">›</span>
+          <Link to={`/channels/${src.id}`} className={link} title={src.title}>
+            {src.title}
+          </Link>
+        </>
+      ) : (
+        <Link to={`/channels/${src.id}`} className={link} title={src.title}>
+          {src.title}
+        </Link>
+      )}
+    </div>
+  );
+}
+
 export function MediaGrid({
   items,
   linkTo,
   onOpenPhoto,
+  sources,
   emptyLabel = "暂无内容",
 }: {
   items: MediaItem[];
   linkTo?: (m: MediaItem) => string;
   onOpenPhoto?: (m: MediaItem) => void;
+  // When given (cross-channel lists), each tile gets a link back to its origin.
+  sources?: Record<string, MediaSource>;
   emptyLabel?: string;
 }) {
   if (items.length === 0) return <EmptyState title={emptyLabel} />;
@@ -110,22 +140,30 @@ export function MediaGrid({
           </>
         );
 
-        const cls = cx(
-          "card group flex flex-col overflow-hidden p-0 text-left transition-colors",
-          "hover:border-brand-300 dark:hover:border-brand-500/40",
-        );
-
-        if (m.kind === "photo") {
-          return (
-            <button key={`p${m.id}`} type="button" onClick={() => onOpenPhoto?.(m)} className={cls}>
+        const src = sources?.[String(m.channel_id)];
+        const key = `${m.kind}${m.id}`;
+        // The clickable tile and the source links must be siblings: an <a>
+        // inside an <a> (or a <button>) is invalid and the inner click is lost.
+        const hit = "group flex flex-1 flex-col text-left";
+        const body =
+          m.kind === "photo" ? (
+            <button type="button" onClick={() => onOpenPhoto?.(m)} className={hit}>
               {tile}
             </button>
+          ) : (
+            <Link to={linkTo ? linkTo(m) : `/videos/${m.id}`} className={hit}>
+              {tile}
+            </Link>
           );
-        }
+
         return (
-          <Link key={`v${m.id}`} to={linkTo ? linkTo(m) : `/videos/${m.id}`} className={cls}>
-            {tile}
-          </Link>
+          <div
+            key={key}
+            className="card flex flex-col overflow-hidden p-0 transition-colors hover:border-brand-300 dark:hover:border-brand-500/40"
+          >
+            {body}
+            {src && <SourceLine src={src} />}
+          </div>
         );
       })}
     </div>

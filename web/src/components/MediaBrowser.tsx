@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 
-import { MediaItem, MediaKindFilter } from "../api/client";
+import { MediaItem, MediaKindFilter, MediaSource } from "../api/client";
 import { Lightbox } from "./Lightbox";
 import { MediaGrid } from "./MediaGrid";
 import { FilmIcon, GridIcon, ImageIcon } from "./icons";
@@ -65,11 +65,13 @@ export function MediaBrowser({
   items,
   isLoading,
   linkTo,
+  sources,
   emptyLabel,
 }: {
   items: MediaItem[];
   isLoading?: boolean;
   linkTo?: (m: MediaItem) => string;
+  sources?: Record<string, MediaSource>;
   emptyLabel?: string;
 }) {
   const photos = useMemo(() => items.filter((i) => i.kind === "photo"), [items]);
@@ -81,6 +83,7 @@ export function MediaBrowser({
       <MediaGrid
         items={items}
         linkTo={linkTo}
+        sources={sources}
         emptyLabel={emptyLabel}
         onOpenPhoto={(m) => {
           const i = photos.findIndex((p) => p.id === m.id);

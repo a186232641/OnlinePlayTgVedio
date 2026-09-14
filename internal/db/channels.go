@@ -356,11 +356,26 @@ func (d *DB) CountTopics(ctx context.Context, parentID, userID int64) (int64, er
 	return n, err
 }
 
-// TopicCounts returns topic counts keyed by parent channel id for one user, so
-// the channel list can show "N 个话题" without a query per row.
-func (d *DB) TopicCounts(ctx context.Context, userID int64) (map[int64]int64, error) {
+// TopicStat aggregates a forum group's topics: how many there are, and how much
+// media they hold between them.
+type TopicStat struct {
+	Topics int64
+	Videos int64
+	Photos int64
+}
+
+// TopicStats returns per-parent topic aggregates for one user in a single
+// grouped query, so the channel list can show a forum group's real content
+// without a query per row.
+//
+// The media totals are what decide whether a group belongs in the browsing
+// view at all. Topic *count* is not enough: discovery enumerates the topics of
+// every forum the account has joined, synced or not, so "has topics" is true
+// for groups nobody has ever pulled a single message from.
+func (d *DB) TopicStats(ctx context.Context, userID int64) (map[int64]TopicStat, error) {
 	rows, err := d.Query(ctx, `
-        SELECT parent_channel_id, count(*)
+        SELECT parent_channel_id, count(*),
+               COALESCE(SUM(video_count), 0), COALESCE(SUM(photo_count), 0)
         FROM channels
         WHERE user_id=$1 AND dialog_kind=$2 AND parent_channel_id IS NOT NULL
         GROUP BY parent_channel_id
@@ -369,13 +384,53 @@ func (d *DB) TopicCounts(ctx context.Context, userID int64) (map[int64]int64, er
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[int64]int64{}
+	out := map[int64]TopicStat{}
 	for rows.Next() {
-		var parent, n int64
-		if err := rows.Scan(&parent, &n); err != nil {
+		var parent int64
+		var st TopicStat
+		if err := rows.Scan(&parent, &st.Topics, &st.Videos, &st.Photos); err != nil {
 			return nil, err
 		}
-		out[parent] = n
+		out[parent] = st
+	}
+	return out, rows.Err()
+}
+
+// ChannelSource is the display identity of a channel row: its own title, and
+// for a topic the group it belongs to.
+type ChannelSource struct {
+	ID          int64
+	Title       string
+	DialogKind  string
+	ParentID    int64
+	ParentTitle string
+}
+
+// ChannelSources resolves the given channel ids (scoped to the user) to their
+// titles in one query, including the parent group for topic rows. Used by
+// cross-channel lists — favorites — to label and link each item's origin.
+func (d *DB) ChannelSources(ctx context.Context, userID int64, ids []int64) (map[int64]ChannelSource, error) {
+	out := map[int64]ChannelSource{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := d.Query(ctx, `
+        SELECT c.id, c.title, c.dialog_kind,
+               COALESCE(c.parent_channel_id, 0), COALESCE(p.title, '')
+        FROM channels c
+        LEFT JOIN channels p ON p.id = c.parent_channel_id
+        WHERE c.user_id=$1 AND c.id = ANY($2)
+    `, userID, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var src ChannelSource
+		if err := rows.Scan(&src.ID, &src.Title, &src.DialogKind, &src.ParentID, &src.ParentTitle); err != nil {
+			return nil, err
+		}
+		out[src.ID] = src
 	}
 	return out, rows.Err()
 }

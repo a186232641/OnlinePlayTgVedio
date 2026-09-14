@@ -69,7 +69,14 @@ func (h *FavoritesHandlers) List(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, err)
 		return
 	}
-	writeMediaPage(w, items, next, hasMore, nil)
+	// Favorites span every channel and topic, so each page carries where its
+	// items came from — the grid links back to the source.
+	sources, err := mediaSources(r, h.DB, uid, items)
+	if err != nil {
+		httpx.WriteError(w, err)
+		return
+	}
+	writeMediaPage(w, items, next, hasMore, map[string]any{"sources": sources})
 }
 
 func (h *FavoritesHandlers) Add(w http.ResponseWriter, r *http.Request) {

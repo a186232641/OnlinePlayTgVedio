@@ -48,7 +48,7 @@ export function Favorites() {
   const [draft, setDraft] = useState<Filters>(submitted);
   useEffect(() => { setDraft(submitted); }, [searchParams]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const { query: q, items } = useMediaPages(
+  const { query: q, items, sources } = useMediaPages(
     ["favorites", submitted],
     () => paramsFromFilters(submitted),
     { path: "/api/favorites/" },
@@ -161,6 +161,7 @@ export function Favorites() {
         items={items}
         isLoading={q.isLoading}
         linkTo={linkTo}
+        sources={sources}
         emptyLabel={filtered ? "无匹配收藏" : "暂无收藏 — 播放页或图片查看器里点「收藏」即可加入"}
       />
 

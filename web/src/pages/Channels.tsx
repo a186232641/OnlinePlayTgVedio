@@ -5,10 +5,12 @@ import { api, Channel, TgSession } from "../api/client";
 import { ChevronRightIcon, TopicsIcon } from "../components/icons";
 import { EmptyState, LoadingState, PageHeader } from "../components/ui";
 
-// Browsing view: any channel/group with imported media shows up as a card, plus
-// forum groups that have topics (their media lives one level down, in the
-// topics, so their own counts are zero). Topic rows themselves are reached from
-// the group card, not listed here.
+// Browsing view: a channel shows up once it holds media. A forum group's own
+// counters are always 0 (its content lives in its topics), so for a group what
+// counts is the media summed across its topics — NOT merely having topics:
+// discovery enumerates the topics of every forum the account has joined, so
+// "has topics" is true for groups nobody has ever synced. Topic rows themselves
+// are reached from the group card, not listed here.
 export function Channels() {
   const sessions = useQuery<{ sessions: TgSession[] }>({
     queryKey: ["sessions"],
@@ -23,11 +25,12 @@ export function Channels() {
 
   const sessList = sessions.data?.sessions ?? [];
   const channels = all.data?.channels ?? [];
-  const browsable = channels.filter(
-    (c) => c.video_count > 0 || c.photo_count > 0 || (c.is_forum && c.topic_count > 0),
-  );
-  const totalVideos = browsable.reduce((n, c) => n + c.video_count, 0);
-  const totalPhotos = browsable.reduce((n, c) => n + c.photo_count, 0);
+  // For a forum group the media lives in its topics; for anything else, on the row.
+  const videosOf = (c: Channel) => c.video_count + (c.is_forum ? c.topic_video_count : 0);
+  const photosOf = (c: Channel) => c.photo_count + (c.is_forum ? c.topic_photo_count : 0);
+  const browsable = channels.filter((c) => videosOf(c) > 0 || photosOf(c) > 0);
+  const totalVideos = browsable.reduce((n, c) => n + videosOf(c), 0);
+  const totalPhotos = browsable.reduce((n, c) => n + photosOf(c), 0);
 
   return (
     <div className="p-4 md:p-6">
@@ -90,11 +93,11 @@ export function Channels() {
                       {c.topic_count.toLocaleString()} 话题
                     </span>
                   )}
-                  {c.video_count > 0 && (
-                    <span className="badge badge-brand">{c.video_count.toLocaleString()} 视频</span>
+                  {videosOf(c) > 0 && (
+                    <span className="badge badge-brand">{videosOf(c).toLocaleString()} 视频</span>
                   )}
-                  {c.photo_count > 0 && (
-                    <span className="badge badge-gray">{c.photo_count.toLocaleString()} 图片</span>
+                  {photosOf(c) > 0 && (
+                    <span className="badge badge-gray">{photosOf(c).toLocaleString()} 图片</span>
                   )}
                 </div>
               </div>
