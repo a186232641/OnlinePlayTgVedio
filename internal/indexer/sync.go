@@ -79,15 +79,31 @@ func (i *Indexer) SyncStart(parentCtx context.Context, channelID, userID int64) 
 	i.syncs[channelID] = st
 	i.syncMu.Unlock()
 
+	go i.runChannelSync(ch, cli.API, st)
+	return st.snapshot(), nil
+}
+
+// runChannelSync picks the right strategy for a channel and runs it.
+//
+// The forum flag is re-checked against Telegram first (one cheap RPC): a row
+// that predates forum support, or a group converted to a forum after it was
+// discovered, would otherwise be walked as a plain channel — and that is not a
+// smaller version of the right thing, it's the wrong thing. A forum's
+// getHistory returns every topic's messages flattened onto the group row, so
+// the whole point of topics is lost and the media ends up in one bucket.
+func (i *Indexer) runChannelSync(ch *db.Channel, api *tg.Client, st *syncEntry) {
+	probeCtx, cancel := context.WithTimeout(context.Background(), forumProbeTimeout+5*time.Second)
+	isForum := i.refreshForumFlag(probeCtx, api, ch)
+	cancel()
+
 	// A forum group has no browsable history of its own — every message belongs
 	// to a topic. Syncing it means "refresh the topic list, then sync each
 	// topic", which is what runForumSync does.
-	if ch.IsForum && ch.DialogKind != db.DialogKindTopic {
-		go i.runForumSync(ch, cli.API, st)
-		return st.snapshot(), nil
+	if isForum && ch.DialogKind != db.DialogKindTopic {
+		i.runForumSync(ch, api, st)
+		return
 	}
-	go i.runSync(ch, cli.API, st)
-	return st.snapshot(), nil
+	i.runSync(ch, api, st)
 }
 
 // runForumSync re-enumerates a forum group's topics and then syncs them one by

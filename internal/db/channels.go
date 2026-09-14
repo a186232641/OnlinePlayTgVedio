@@ -379,3 +379,12 @@ func (d *DB) TopicCounts(ctx context.Context, userID int64) (map[int64]int64, er
 	}
 	return out, rows.Err()
 }
+
+// SetIsForum records whether a megagroup is a forum (has topics). Discovery
+// sets it, but sync re-checks it: getting it wrong is expensive, because a
+// forum's own getHistory returns every topic's messages flattened into the
+// group row.
+func (d *DB) SetIsForum(ctx context.Context, channelID int64, isForum bool) error {
+	_, err := d.Exec(ctx, `UPDATE channels SET is_forum=$2 WHERE id=$1`, channelID, isForum)
+	return err
+}

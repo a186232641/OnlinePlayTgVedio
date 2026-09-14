@@ -88,6 +88,15 @@ re-fetches a message (`refresh.go`, the cache downloader) works on a topic row u
 forum group (`runForumSync`) re-enumerates its topics and then syncs them **sequentially** — they
 share one TG session, and parallel history walks are the shortest path to a FLOOD_WAIT.
 
+**The forum flag is re-checked on every sync run** (`refreshForumFlag`, one `channels.getChannels`
+call). Discovery is the only other thing that writes it, so a row created before forum support —
+or a group converted to a forum afterwards — would still say `false`, and walking a forum as a
+plain channel is not a smaller version of the right thing, it's the wrong thing: `getHistory` on a
+forum returns **every topic's messages flattened onto the group row**, so all the media piles into
+one bucket and the topic structure is lost. When that has already happened the group's own
+`video_count`/`photo_count` are non-zero while `is_forum` is true; the topic list surfaces those as
+orphans with a view/clear action rather than silently hiding them.
+
 Because a topic row *is* a channel row, `POST /channels/{topicID}/sync` syncs one topic on its own,
 which is the normal way to use this: a group can hold dozens of topics with hundreds of thousands
 of messages each, so the group-level "sync everything" is the batch option, not the only one. The

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/gotd/td/tg"
 
@@ -132,4 +133,52 @@ func (i *Indexer) upsertTopic(ctx context.Context, parent *db.Channel, t *tg.For
 		return fmt.Errorf("upsert topic %d (%s): %w", t.ID, t.Title, err)
 	}
 	return nil
+}
+
+// forumProbeTimeout bounds the one RPC that asks whether a peer is a forum.
+const forumProbeTimeout = 30 * time.Second
+
+// refreshForumFlag re-checks with Telegram whether this channel is a forum and
+// persists the answer, returning the current truth.
+//
+// Why sync re-checks something discovery already set: the flag only gets
+// written when dialogs are enumerated, so any row created before forum support
+// existed still says false — and a plain sync of a forum group is actively
+// wrong, not merely incomplete. messages.getHistory on a forum returns every
+// topic's messages flattened into the group row, so all the media piles into
+// one undifferentiated bucket and the topic structure is lost. One cheap RPC
+// per sync run is well worth avoiding that.
+//
+// A failed probe is not fatal: it keeps whatever the row already said.
+func (i *Indexer) refreshForumFlag(ctx context.Context, api *tg.Client, ch *db.Channel) bool {
+	if ch.DialogKind == db.DialogKindTopic {
+		return false
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, forumProbeTimeout)
+	defer cancel()
+
+	chats, err := api.ChannelsGetChannels(probeCtx, []tg.InputChannelClass{
+		&tg.InputChannel{ChannelID: ch.TGChannelID, AccessHash: ch.AccessHash},
+	})
+	if err != nil {
+		slog.Warn("forum probe failed, keeping stored flag",
+			"channel_id", ch.ID, "is_forum", ch.IsForum, "err", err)
+		return ch.IsForum
+	}
+	for _, c := range chats.GetChats() {
+		full, ok := c.(*tg.Channel)
+		if !ok || full.ID != ch.TGChannelID {
+			continue
+		}
+		if full.Forum != ch.IsForum {
+			slog.Info("forum flag corrected", "channel_id", ch.ID, "title", ch.Title,
+				"was", ch.IsForum, "now", full.Forum)
+			if err := i.db.SetIsForum(ctx, ch.ID, full.Forum); err != nil {
+				slog.Warn("persist forum flag", "channel_id", ch.ID, "err", err)
+			}
+			ch.IsForum = full.Forum
+		}
+		return full.Forum
+	}
+	return ch.IsForum
 }

@@ -6,8 +6,8 @@ import { api, Channel, MediaItem, MediaKindFilter, Streamer, SyncState, Topic } 
 import { MEDIA_PAGE_SIZE, useMediaPages } from "../api/media";
 import { KindTabs, MediaBrowser } from "../components/MediaBrowser";
 import { SortSelect, SortValue, DEFAULT_SORT } from "../components/SortSelect";
-import { ChevronLeftIcon, ChevronRightIcon, RefreshIcon, SearchIcon, TopicsIcon } from "../components/icons";
-import { EmptyState, LoadingState, MoreFooter, PageHeader, Toggle } from "../components/ui";
+import { ChevronLeftIcon, ChevronRightIcon, RefreshIcon, SearchIcon, TopicsIcon, TrashIcon } from "../components/icons";
+import { AlertStrip, EmptyState, LoadingState, MoreFooter, PageHeader, Toggle } from "../components/ui";
 
 interface ChannelResp { channel: Channel }
 interface StreamersResp { streamers: Streamer[] }
@@ -80,7 +80,7 @@ export function ChannelDetail() {
         }
       />
 
-      {isForum && <TopicList id={id!} />}
+      {isForum && <TopicList id={id!} channel={channel} />}
       {!isForum && !grouped && <MediaView id={id!} channel={channel} />}
       {!isForum && grouped && selected === null && <StreamerList id={id!} onPick={setSelected} />}
       {!isForum && grouped && selected !== null && (
@@ -97,9 +97,31 @@ export function ChannelDetail() {
 // hundreds of thousands of messages each, so "sync the whole group" is the
 // batch option, not the only one. Live progress for every row comes from the
 // topics endpoint itself (one poll, not one per row).
-function TopicList({ id }: { id: string }) {
+function TopicList({ id, channel }: { id: string; channel?: Channel }) {
   const qc = useQueryClient();
   const [filter, setFilter] = useState("");
+  // A forum group that was synced before it was recognised as one has media on
+  // its OWN row (getHistory on a forum returns every topic flattened), which
+  // the topic view would otherwise hide forever.
+  const orphaned = (channel?.video_count ?? 0) + (channel?.photo_count ?? 0);
+  const [showOrphaned, setShowOrphaned] = useState(false);
+
+  const clearOrphaned = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`/api/channels/${id}/videos`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (!res.ok) throw new Error(`清空失败 (${res.status})`);
+      return res.json() as Promise<{ deleted: number }>;
+    },
+    onSuccess: (resp) => {
+      qc.invalidateQueries({ queryKey: ["channel", id] });
+      setShowOrphaned(false);
+      alert(`已清空 ${resp.deleted} 条未分话题的内容`);
+    },
+    onError: (e: Error) => alert(e.message),
+  });
 
   const q = useQuery<TopicsResp>({
     queryKey: ["channel", id, "topics"],
@@ -165,6 +187,40 @@ function TopicList({ id }: { id: string }) {
           同步全部话题
         </button>
       </div>
+
+      {orphaned > 0 && (
+        <AlertStrip tone="warning" title={`有 ${orphaned.toLocaleString()} 条内容没有归属话题`}>
+          <div className="space-y-2">
+            <div>
+              这些是把该群组当普通频道抓取时留下的 —— 论坛群组的 getHistory
+              会把所有话题的消息拍平到群组本身,所以它们没有话题归属。按话题重新同步后,
+              同样的内容会重新落到各自的话题里。
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={() => setShowOrphaned((v) => !v)}
+                className="btn btn-outline btn-sm"
+              >
+                {showOrphaned ? "收起" : "查看这些内容"}
+              </button>
+              <button
+                onClick={() => {
+                  if (confirm(`清空这 ${orphaned} 条未分话题的内容?\n\n它们的收藏会一并删除。各话题自己同步的内容不受影响。`)) {
+                    clearOrphaned.mutate();
+                  }
+                }}
+                disabled={clearOrphaned.isPending}
+                className="btn btn-danger btn-sm"
+              >
+                <TrashIcon className="size-4" />
+                {clearOrphaned.isPending ? "清空中…" : "清空"}
+              </button>
+            </div>
+          </div>
+        </AlertStrip>
+      )}
+
+      {showOrphaned && <MediaView id={id} channel={channel} />}
 
       {list.length === 0 ? (
         <EmptyState
