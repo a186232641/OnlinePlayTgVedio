@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { ApiError, MediaItem, MediaKindFilter } from "../api/client";
-import { MEDIA_PAGE_SIZE, useMediaPages } from "../api/media";
+import { MEDIA_PAGE_SIZE, normalizeKind, useMediaPages } from "../api/media";
 import { KindTabs, MediaBrowser } from "../components/MediaBrowser";
 import { SortSelect, SortValue, normalizeSort, DEFAULT_SORT } from "../components/SortSelect";
 import { AlertStrip, MoreFooter, PageHeader } from "../components/ui";
@@ -13,10 +13,6 @@ interface Filters {
   dateTo: string;
   order: SortValue;
   kind: MediaKindFilter;
-}
-
-function normalizeKind(s: string | null): MediaKindFilter {
-  return s === "video" || s === "photo" ? s : "";
 }
 
 // URL is the source of truth so returning from a video restores the filtered,
@@ -80,6 +76,8 @@ export function Favorites() {
     if (submitted.dateFrom) p.set("date_from", submitted.dateFrom);
     if (submitted.dateTo) p.set("date_to", submitted.dateTo);
     if (submitted.order !== DEFAULT_SORT) p.set("order", submitted.order);
+    // Not used by the playlist (always videos) — carried so "返回收藏" restores the tab.
+    if (submitted.kind) p.set("kind", submitted.kind);
     return `/videos/${m.id}?${p}`;
   };
 

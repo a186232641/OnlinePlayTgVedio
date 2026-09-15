@@ -1,11 +1,11 @@
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { api, Channel, MediaItem, MediaKindFilter, Streamer, SyncState, Topic } from "../api/client";
-import { MEDIA_PAGE_SIZE, useMediaPages } from "../api/media";
+import { MEDIA_PAGE_SIZE, normalizeKind, useMediaPages } from "../api/media";
 import { KindTabs, MediaBrowser } from "../components/MediaBrowser";
-import { SortSelect, SortValue, DEFAULT_SORT } from "../components/SortSelect";
+import { SortSelect, DEFAULT_SORT, normalizeSort } from "../components/SortSelect";
 import { ChevronLeftIcon, ChevronRightIcon, RefreshIcon, SearchIcon, TopicsIcon, TrashIcon } from "../components/icons";
 import { AlertStrip, EmptyState, LoadingState, MoreFooter, PageHeader, Toggle } from "../components/ui";
 
@@ -27,8 +27,20 @@ export function ChannelDetail() {
   const isTopic = channel?.dialog_kind === "topic";
   const grouped = !!channel?.group_by_streamer;
 
-  // null = streamer-list view; a string (possibly "") = that streamer's videos.
-  const [selected, setSelected] = useState<string | null>(null);
+  // The view state lives in the URL, not in component state, so that coming
+  // back from the player (or a reload) lands on the same filtered list. With
+  // useState it all reset on every navigation.
+  //
+  // ?streamer absent = streamer-list view; present (possibly "") = that
+  // streamer's videos.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const selected = searchParams.has("streamer") ? searchParams.get("streamer") ?? "" : null;
+  const setSelected = (s: string | null) => {
+    const p = new URLSearchParams(searchParams);
+    if (s === null) p.delete("streamer");
+    else p.set("streamer", s);
+    setSearchParams(p);
+  };
 
   const toggleGroup = useMutation({
     mutationFn: (val: boolean) =>
@@ -334,10 +346,32 @@ function TopicCard({ topic }: { topic: Topic }) {
 // date, with a kind filter, free-text search and sorting.
 function MediaView({ id, channel }: { id: string; channel?: Channel }) {
   const qc = useQueryClient();
-  const [draft, setDraft] = useState("");
-  const [query, setQuery] = useState("");
-  const [order, setOrder] = useState<SortValue>(DEFAULT_SORT);
-  const [kind, setKind] = useState<MediaKindFilter>("");
+  // q / order / kind are read from the URL (see ChannelDetail); only the
+  // half-typed search box is local.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const query = searchParams.get("q") ?? "";
+  const order = normalizeSort(searchParams.get("order"));
+  const kind = normalizeKind(searchParams.get("kind"));
+  const [draft, setDraft] = useState(query);
+  useEffect(() => setDraft(query), [query]);
+
+  // replace, not push: flipping a filter shouldn't add a Back step — Back
+  // should leave the page, which is what the player's return link mirrors.
+  const patch = (next: { q?: string; order?: string; kind?: MediaKindFilter }) => {
+    const p = new URLSearchParams(searchParams);
+    const set = (k: string, v: string | undefined, dflt = "") => {
+      if (v === undefined) return;
+      if (v && v !== dflt) p.set(k, v);
+      else p.delete(k);
+    };
+    set("q", next.q);
+    set("order", next.order, DEFAULT_SORT);
+    set("kind", next.kind);
+    setSearchParams(p, { replace: true });
+  };
+  const setQuery = (v: string) => patch({ q: v });
+  const setOrder = (v: string) => patch({ order: v });
+  const setKind = (v: MediaKindFilter) => patch({ kind: v });
 
   const { query: q, items, totalVideos, totalPhotos } = useMediaPages(
     ["channel", id, "media", query, order, kind],
@@ -519,7 +553,14 @@ function StreamerList({ id, onPick }: { id: string; onPick: (s: string) => void 
 
 // StreamerVideos is the drill-down: one streamer's videos, paginated.
 function StreamerVideos({ id, streamer, onBack }: { id: string; streamer: string; onBack: () => void }) {
-  const [order, setOrder] = useState<SortValue>(DEFAULT_SORT);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const order = normalizeSort(searchParams.get("order"));
+  const setOrder = (v: string) => {
+    const p = new URLSearchParams(searchParams);
+    if (v !== DEFAULT_SORT) p.set("order", v);
+    else p.delete("order");
+    setSearchParams(p, { replace: true });
+  };
 
   const { query: q, items } = useMediaPages(
     ["channel", id, "streamer-media", streamer, order],

@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 
 import { api, Channel, MediaKindFilter } from "../api/client";
-import { MEDIA_PAGE_SIZE, useMediaPages } from "../api/media";
+import { MEDIA_PAGE_SIZE, normalizeKind, useMediaPages } from "../api/media";
 import { KindTabs, MediaBrowser } from "../components/MediaBrowser";
 import { SortSelect, SortValue, normalizeSort, DEFAULT_SORT } from "../components/SortSelect";
 import { EmptyState, LoadingState, MoreFooter, PageHeader } from "../components/ui";
@@ -16,10 +16,6 @@ interface Filters {
   channelID: number;
   order: SortValue;
   kind: MediaKindFilter;
-}
-
-function normalizeKind(s: string | null): MediaKindFilter {
-  return s === "video" || s === "photo" ? s : "";
 }
 
 // The URL query string is the single source of truth for the active search, so

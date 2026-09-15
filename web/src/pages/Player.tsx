@@ -3,7 +3,7 @@ import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClie
 import { useEffect, useMemo, useRef, useState } from "react";
 import mpegts from "mpegts.js";
 
-import { api, MediaCursor, MediaItem, MediaPage, Video } from "../api/client";
+import { api, Channel, MediaCursor, MediaItem, MediaPage, Video } from "../api/client";
 import { ChevronLeftIcon, ChevronRightIcon, PlayIcon, StarIcon } from "../components/icons";
 import { LoadingState, Spinner, cx } from "../components/ui";
 
@@ -71,6 +71,42 @@ function playlistRequest(p: URLSearchParams): string | null {
     return `/api/channels/${ch}/media?${qs}`;
   }
   return null;
+}
+
+// backTarget works out where "返回" should go from the same URL params that
+// built the playlist, so the player returns to the exact list it was opened
+// from — with its filters — instead of always to the home page.
+//
+// Order matters: favorites and the search page both carry file_name/date
+// filters, and the search page also sets ?ch when a channel is picked, so
+// "fav" is checked first, then the search-page fields, and only then a bare
+// channel/topic context (whose own search uses ?q, not ?text/?file_name).
+type Back = { to: string; kind: "fav" | "search" | "channel" | "home"; ch?: string };
+
+function backTarget(p: URLSearchParams): Back {
+  const pick = (keys: string[], rename: Record<string, string> = {}) => {
+    const out = new URLSearchParams();
+    for (const k of keys) {
+      if (p.has(k)) out.set(rename[k] ?? k, p.get(k) ?? "");
+    }
+    const qs = out.toString();
+    return qs ? `?${qs}` : "";
+  };
+
+  if (p.get("fav")) {
+    return { kind: "fav", to: `/favorites${pick(["file_name", "date_from", "date_to", "order", "kind"])}` };
+  }
+  if (p.get("text") || p.get("file_name") || p.get("date_from") || p.get("date_to")) {
+    return {
+      kind: "search",
+      to: `/search${pick(["text", "file_name", "date_from", "date_to", "order", "kind", "ch"], { ch: "channel_id" })}`,
+    };
+  }
+  const ch = p.get("ch");
+  if (ch) {
+    return { kind: "channel", ch, to: `/channels/${ch}${pick(["q", "order", "kind", "streamer"])}` };
+  }
+  return { kind: "home", to: "/" };
 }
 
 // withCursor appends the merged-list keyset cursor. Only the video half matters
@@ -288,6 +324,25 @@ export function Player() {
 
   const v = meta.data?.video;
   const hasPlaylist = list.length > 0;
+
+  const back = useMemo(() => backTarget(searchParams), [searchParams]);
+  // Name the channel/topic we're returning to. Usually already cached from the
+  // page the user just came from, so this rarely costs a request.
+  const backChannel = useQuery<{ channel: Channel }>({
+    queryKey: ["channel", back.ch],
+    queryFn: () => api.get(`/api/channels/${back.ch}`),
+    enabled: back.kind === "channel",
+  });
+  const backLabel =
+    back.kind === "fav"
+      ? "返回收藏"
+      : back.kind === "search"
+        ? "返回搜索结果"
+        : back.kind === "channel"
+          ? backChannel.data?.channel
+            ? `返回${backChannel.data.channel.dialog_kind === "topic" ? "话题" : "频道"}「${backChannel.data.channel.title}」`
+            : "返回"
+          : "返回我的频道";
   const showLoading = meta.isLoading && !meta.data;
   const showNotFound = !meta.isLoading && !meta.data;
   const isFav = !!meta.data?.favorite;
@@ -413,11 +468,11 @@ export function Player() {
                 {v.from && <span>from: {v.from}</span>}
                 {containerHint && <span className="badge badge-info">{containerHint}</span>}
                 <Link
-                  to="/"
-                  className="ml-auto inline-flex items-center gap-1 hover:text-gray-700 dark:hover:text-gray-200"
+                  to={back.to}
+                  className="ml-auto inline-flex max-w-full items-center gap-1 truncate hover:text-gray-700 dark:hover:text-gray-200"
                 >
-                  <ChevronLeftIcon className="size-4" />
-                  返回频道
+                  <ChevronLeftIcon className="size-4 shrink-0" />
+                  <span className="truncate">{backLabel}</span>
                 </Link>
               </div>
             </div>

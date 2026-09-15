@@ -1,9 +1,14 @@
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 
-import { api, MediaCursor, MediaItem, MediaPage, MediaSource } from "./client";
+import { api, MediaCursor, MediaItem, MediaKindFilter, MediaPage, MediaSource } from "./client";
 
 export const MEDIA_PAGE_SIZE = 120;
+
+// normalizeKind coerces a ?kind= URL value to a known filter ("" = both).
+export function normalizeKind(s: string | null): MediaKindFilter {
+  return s === "video" || s === "photo" ? s : "";
+}
 
 // useMediaPages wraps the merged video+image listing in one infinite query.
 //
