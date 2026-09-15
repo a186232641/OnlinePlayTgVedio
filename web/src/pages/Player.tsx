@@ -1,6 +1,6 @@
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import mpegts from "mpegts.js";
 
 import { api, Channel, MediaCursor, MediaItem, MediaPage, Video } from "../api/client";
@@ -109,6 +109,48 @@ function backTarget(p: URLSearchParams): Back {
   return { kind: "home", to: "/" };
 }
 
+// flipOrder maps a sort key to its reverse, so "the rows before X" can be asked
+// for as "the rows after X in the opposite order" — the media endpoints only
+// page forward. duration keeps a plain id cursor server-side and has no
+// meaningful reverse, so it returns null (the playlist then just starts at the
+// top of the list, the old behaviour).
+function flipOrder(order: string | null): string | null {
+  switch (order ?? "") {
+    case "":
+    case "date_desc":
+      return "date_asc";
+    case "date_asc":
+      return "date_desc";
+    case "name_asc":
+      return "name_desc";
+    case "name_desc":
+      return "name_asc";
+    default:
+      return null;
+  }
+}
+
+// PlaylistPage is one fetched slice of the playlist window.
+interface PlaylistPage {
+  items: MediaItem[];
+  hasMore: boolean; // more rows below this page
+  next?: number; //    cursor for the next page (last row's video id)
+  hasPrev: boolean; // more rows above this page
+  // Set on pages loaded upward: the id of the row that followed them when they
+  // were fetched. See getNextPageParam — without it a refetch breaks the list.
+  continueFrom?: number;
+}
+
+type PlaylistParam =
+  | { kind: "top" } // start of the list (unflippable order)
+  | { kind: "anchor"; id: number } // the opened video, then the rows after it
+  | { kind: "after"; id: number }
+  | { kind: "before"; id: number; key: string };
+
+function videoToItem(v: Video): MediaItem {
+  return { ...v, kind: "video", url: v.stream_url, thumb_url: `/api/videos/${v.id}/thumb` };
+}
+
 // withCursor appends the merged-list keyset cursor. Only the video half matters
 // here (the playlist is kind=video), but the shape stays the server's.
 function withCursor(url: string, cursor: MediaCursor): string {
@@ -206,18 +248,89 @@ export function Player() {
     placeholderData: keepPreviousData,
   });
 
-  // Playlist (siblings from the same context). useInfiniteQuery so we can
-  // page past 500 items as the user scrolls / autoplays towards the bottom.
+  // Playlist (siblings from the same context), windowed AROUND the video that
+  // was opened rather than always starting at the top of the list.
+  //
+  // Starting at the top meant the opened video was simply absent whenever it
+  // sat past the first page (easy after paging a grid a few times), so the
+  // sidebar had nothing to scroll to — and with automatic paging removed the
+  // user would have to page manually to find it. Now the first page is the
+  // opened video followed by the rows after it, so it is always row one and
+  // there is no timing to get wrong. Rows before it load on demand from a
+  // button at the top (fetched as "after it, in the reverse order").
+  //
+  // The anchor is sticky while the user moves through this window (clicking
+  // the next item keeps the same list); it only re-anchors when the current
+  // video isn't in the loaded window at all.
   const baseURL = playlistRequest(searchParams);
-  const playlist = useInfiniteQuery<MediaPage>({
-    queryKey: ["playlist", playlistKey],
+  const order = searchParams.get("order");
+  const reverseOrder = flipOrder(order);
+  const [anchor, setAnchor] = useState(() => Number(id));
+  const playlist = useInfiniteQuery<PlaylistPage>({
+    queryKey: ["playlist", playlistKey, reverseOrder ? anchor : "top"],
     enabled: !!baseURL,
-    initialPageParam: {} as MediaCursor,
-    queryFn: ({ pageParam }) => {
-      if (!baseURL) return Promise.resolve({ items: [], next: {}, has_more: false });
-      return api.get<MediaPage>(withCursor(baseURL, pageParam as MediaCursor));
+    initialPageParam: (reverseOrder ? { kind: "anchor", id: anchor } : { kind: "top" }) as PlaylistParam,
+    queryFn: async ({ pageParam }) => {
+      const pp = pageParam as PlaylistParam;
+      if (!baseURL) return { items: [], hasMore: false, hasPrev: false };
+
+      if (pp.kind === "before") {
+        const url = new URL(baseURL, window.location.origin);
+        url.searchParams.set("order", reverseOrder!);
+        url.searchParams.set("offset_video", String(pp.id));
+        const resp = await api.get<MediaPage>(url.pathname + url.search);
+        // NULLS LAST holds in both directions, so the reverse query also
+        // returns the empty-key tail — rows that really sort at the very END of
+        // the list. Drop them when the boundary row has a key.
+        const keyOf = (m: MediaItem) =>
+          (order ?? "").startsWith("name") ? m.file_name ?? "" : m.date ?? "";
+        const rows = resp.items.filter((m) => keyOf(m) !== "");
+        return { items: rows.reverse(), hasMore: true, continueFrom: pp.id, hasPrev: resp.has_more };
+      }
+
+      if (pp.kind === "anchor") {
+        const [meta, rest] = await Promise.all([
+          api.get<VideoResp>(`/api/videos/${pp.id}`),
+          api.get<MediaPage>(withCursor(baseURL, { video: pp.id })),
+        ]);
+        return {
+          items: [videoToItem(meta.video), ...rest.items],
+          hasMore: rest.has_more,
+          next: rest.next.video ?? pp.id,
+          hasPrev: true, // unknown until asked; the button hides once it returns nothing
+        };
+      }
+
+      const cursor = pp.kind === "after" ? { video: pp.id } : {};
+      const resp = await api.get<MediaPage>(withCursor(baseURL, cursor));
+      return { items: resp.items, hasMore: resp.has_more, next: resp.next.video, hasPrev: false };
     },
-    getNextPageParam: (last) => (last.has_more ? last.next : undefined),
+    // A refetch (TanStack's infiniteQueryBehavior) replays page 0 from its
+    // stored param and derives every later page from getNextPageParam. Once a
+    // page has been loaded upward, page 0 is that "before" page — so it must be
+    // able to name what comes after it, or the refetch stops there and silently
+    // drops the opened video and everything below. continueFrom re-anchors on
+    // the row that followed it, which also works when the page came back empty.
+    getNextPageParam: (last) => {
+      if (last.continueFrom != null) return { kind: "anchor", id: last.continueFrom } as PlaylistParam;
+      return last.hasMore && last.next ? ({ kind: "after", id: last.next } as PlaylistParam) : undefined;
+    },
+    // Several 500-row pages re-downloaded on every app switch would be wasted
+    // work on a phone and could shift rows under the user's thumb.
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    getPreviousPageParam: (first) => {
+      const head = first.items[0];
+      if (!first.hasPrev || !head || !reverseOrder) return undefined;
+      const key = (order ?? "").startsWith("name") ? head.file_name ?? "" : head.date ?? "";
+      // The reverse-order trick is only exact for a boundary row that HAS a sort
+      // key. For an empty one (a video with no file name under a name sort) the
+      // server's keyset returns only other empty-key rows, silently skipping
+      // every keyed row that really comes before it — a wrong list is worse
+      // than no button, so offer none.
+      if (key === "") return undefined;
+      return { kind: "before", id: head.id, key } as PlaylistParam;
+    },
   });
 
   const list = useMemo<MediaItem[]>(
@@ -230,6 +343,28 @@ export function Player() {
   );
   const next = currentIdx >= 0 && currentIdx < list.length - 1 ? list[currentIdx + 1] : null;
   const prev = currentIdx > 0 ? list[currentIdx - 1] : null;
+
+  useEffect(() => {
+    if (!reverseOrder || playlist.isFetching || list.length === 0 || currentIdx >= 0) return;
+    setAnchor(Number(id));
+  }, [reverseOrder, playlist.isFetching, list.length, currentIdx, id]);
+
+  // Prepending the previous page would push everything down and scroll the
+  // current row out of view; keep the viewport where it was by offsetting
+  // scrollTop by exactly the height that was inserted above.
+  const prependFrom = useRef<{ height: number; top: number } | null>(null);
+  const loadPrevious = () => {
+    const sc = sidebarRef.current;
+    if (sc) prependFrom.current = { height: sc.scrollHeight, top: sc.scrollTop };
+    playlist.fetchPreviousPage();
+  };
+  useLayoutEffect(() => {
+    const from = prependFrom.current;
+    const sc = sidebarRef.current;
+    if (!from || !sc || playlist.isFetchingPreviousPage) return;
+    sc.scrollTop = from.top + (sc.scrollHeight - from.height);
+    prependFrom.current = null;
+  }, [list.length, playlist.isFetchingPreviousPage]);
 
   // No automatic paging here: the next page loads only from the button at the
   // bottom of the playlist. (It used to prefetch near the end and on scroll.)
@@ -541,18 +676,29 @@ export function Player() {
               <span className="text-theme-sm font-medium text-gray-800 dark:text-white/90">
                 播放列表
               </span>
-              <span className="badge badge-gray tabular-nums">
-                {currentIdx + 1}/{list.length}
-              </span>
-              {playlist.hasNextPage && (
-                <span className="ml-auto text-theme-xs text-gray-400 dark:text-gray-500">
-                  滚动加载更多
-                </span>
-              )}
+              <span className="badge badge-gray tabular-nums">已加载 {list.length}</span>
             </div>
 
             <div ref={sidebarRef} className="custom-scrollbar min-h-0 flex-1 overflow-y-auto">
-              {list.map((item, i) => {
+              {playlist.hasPreviousPage && (
+                <div className="flex justify-center border-b border-gray-100 px-3 py-2.5 dark:border-gray-800/60">
+                  <button
+                    onClick={loadPrevious}
+                    disabled={playlist.isFetchingPreviousPage}
+                    className="btn btn-outline btn-sm"
+                  >
+                    {playlist.isFetchingPreviousPage ? (
+                      <>
+                        <Spinner className="size-3.5" />
+                        加载中…
+                      </>
+                    ) : (
+                      "加载上一页"
+                    )}
+                  </button>
+                </div>
+              )}
+              {list.map((item) => {
                 const isCurrent = String(item.id) === id;
                 return (
                   <button
@@ -574,7 +720,7 @@ export function Player() {
                           : "text-gray-400 dark:text-gray-500",
                       )}
                     >
-                      {isCurrent ? <PlayIcon className="size-3" /> : i + 1}
+                      {isCurrent && <PlayIcon className="size-3" />}
                     </span>
                     <div className="min-w-0 flex-1">
                       <div
@@ -597,9 +743,6 @@ export function Player() {
               })}
 
               <div className="flex flex-col items-center justify-center gap-2 px-3 py-3 text-theme-xs text-gray-400 dark:text-gray-500">
-                {currentIdx < 0 && playlist.hasNextPage && (
-                  <span>当前视频在后面的页里,加载下一页后会高亮显示</span>
-                )}
                 {playlist.hasNextPage ? (
                   <button
                     onClick={() => playlist.fetchNextPage()}

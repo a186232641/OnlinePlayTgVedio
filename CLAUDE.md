@@ -278,6 +278,19 @@ playlist that sits below the player on a phone). The playlist's "center the curr
 re-runs until it has actually found the row for this video — on open the playlist is usually still
 loading, and running once per id change used to give up before the row existed.
 
+**The playlist is windowed around the opened video**, not loaded from the top of the list. Its first
+page is that video followed by the rows after it (`offset_video=<id>`), so it is always row one —
+loading from the top left it absent whenever it sat past the first 500 rows, with nothing to scroll
+to. Rows before it load from a "加载上一页" button as *the rows after it in the reversed sort
+order*, reversed client-side (`flipOrder`); the media endpoints only page forward. That identity
+holds exactly for a boundary row that has a sort key (verified against Postgres with heavy ties),
+once the empty-key tail — which `NULLS LAST` also returns in the reversed order — is dropped; for
+an empty-key boundary it does not, so no upward button is offered. The anchor is sticky while the
+user moves through the window and re-anchors only when the current video isn't in it. Two
+TanStack details matter: a refetch replays page 0 from its stored param and derives every later
+page from `getNextPageParam`, so upward-loaded pages carry `continueFrom` (else a refetch stops at
+them and drops the opened video); and focus/reconnect refetch is off for this query.
+
 `channels.video_count` / `photo_count` are what the list endpoints report as totals, not a live
 `COUNT(*)`: on a million-row channel counting twice per first page costs hundreds of milliseconds
 to render a number that only changes when a sync finishes. `MarkChannelIndexed` recomputes them
