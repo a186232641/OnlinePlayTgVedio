@@ -134,12 +134,16 @@ export function Player() {
   const playlistKey = searchParams.toString();
 
   const [endedAtPageEnd, setEndedAtPageEnd] = useState(false);
+  // The current FLV/TS has no keyframe index, so it can only seek inside what's
+  // already buffered (see the mpegts.js setup below).
+  const [seekLimited, setSeekLimited] = useState(false);
 
   useEffect(() => {
     setMediaErr(null);
     setStreamDiag(null);
     setContainerHint("");
     setEndedAtPageEnd(false);
+    setSeekLimited(false);
   }, [id]);
 
   // Bring the player itself into view when the video changes. There is no
@@ -278,12 +282,31 @@ export function Player() {
           setMediaErr("浏览器不支持 MSE — 该视频(FLV/TS)无法播放");
           return;
         }
-        const player = mpegts.createPlayer({
-          type: kind, // "flv" | "mpegts"
-          url,
-          isLive: false,
-          cors: true,
-          withCredentials: true,
+        const player = mpegts.createPlayer(
+          {
+            type: kind, // "flv" | "mpegts"
+            url,
+            isLive: false,
+            cors: true,
+            withCredentials: true,
+          },
+          {
+            // Default is false: a seek into an unbuffered range then lands on
+            // the nearest keyframe, not the second the user dragged to — up to
+            // a whole GOP off, several seconds on typical live recordings. With
+            // it on, mpegts.js decodes from that keyframe and drops frames up to
+            // the exact target.
+            accurateSeek: true,
+          },
+        );
+        // mpegts.js can only seek outside the buffered range when the file
+        // carries a keyframe index (FLV onMetaData.keyframes; TS never has
+        // one) — MediaInfo.isSeekable() is literally hasKeyframesIndex, and
+        // without it the transmuxer's seek() returns without fetching anything.
+        // That's a property of the file, not something config can fix, so tell
+        // the user why a far drag won't take.
+        player.on(mpegts.Events.MEDIA_INFO, (info: { hasKeyframesIndex?: boolean | null }) => {
+          if (!cancelled && info?.hasKeyframesIndex !== true) setSeekLimited(true);
         });
         player.attachMediaElement(video);
         player.on(mpegts.Events.ERROR, (errType, errDetail, errInfo) => {
@@ -491,6 +514,14 @@ export function Player() {
                 {v.date && <span className="tabular-nums">{v.date.slice(0, 19).replace("T", " ")}</span>}
                 {v.from && <span>from: {v.from}</span>}
                 {containerHint && <span className="badge badge-info">{containerHint}</span>}
+                {seekLimited && (
+                  <span
+                    className="badge badge-warning"
+                    title="该文件没有关键帧索引(常见于直播录像 FLV),播放器无法计算远处时间点对应的文件位置,只能在已缓冲的范围内拖动进度条"
+                  >
+                    无关键帧索引 · 只能在已缓冲范围内拖动
+                  </span>
+                )}
                 <Link
                   to={back.to}
                   className="ml-auto inline-flex max-w-full items-center gap-1 truncate hover:text-gray-700 dark:hover:text-gray-200"

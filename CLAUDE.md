@@ -263,6 +263,15 @@ button is the only way to load more, and autoplay stops at the last loaded video
 Don't reintroduce IntersectionObserver or prefetch loading. The viewer still preloads both
 neighbour images and supports horizontal swipe.
 
+**Seeking FLV/TS (mpegts.js).** Two library behaviours, both read from its source: `accurateSeek`
+defaults to false, so an unbuffered seek lands on the nearest keyframe rather than the target
+(we pass `{ accurateSeek: true }` — it's the `createPlayer` *second* argument, `Config`, not the
+media data source); and `MediaInfo.isSeekable()` is literally `hasKeyframesIndex`, so an FLV with
+no `onMetaData.keyframes` (typical of live-stream recordings) — or any TS — can't seek outside the
+buffered range at all: the transmuxer's `seek()` returns without fetching. That is a property of
+the file; the player shows a badge when `MEDIA_INFO` reports no index. MP4 goes through the native
+`<video>` path and seeks precisely.
+
 **Player positioning.** Nothing in the app resets scroll on navigation, so `Player` scrolls the
 window to the player on each video change *if it's out of view* (a tile far down a grid, or the
 playlist that sits below the player on a phone). The playlist's "center the current row" effect
