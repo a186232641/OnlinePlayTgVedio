@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -101,12 +102,14 @@ func (h *ChannelsHandlers) Get(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"channel": dto})
 }
 
-// topicDTO is a topic's channel row plus its live sync state, so the topic list
-// can show per-topic progress by polling ONE endpoint. Asking for each topic's
-// status separately would mean a request per row on every page load.
-type topicDTO struct {
-	channelDTO
-	Sync *indexer.SyncState `json:"sync,omitempty"`
+// pageParams reads ?q=&limit=&offset= for the small, limit/offset-paged lists
+// (topics, streamers, a session's channels). limit 0 = unpaged.
+func pageParams(r *http.Request) (q string, limit, offset int) {
+	qv := r.URL.Query()
+	q = strings.TrimSpace(qv.Get("q"))
+	limit, _ = strconv.Atoi(qv.Get("limit"))
+	offset, _ = strconv.Atoi(qv.Get("offset"))
+	return q, limit, offset
 }
 
 // Topics lists a forum group's topics.
@@ -123,25 +126,62 @@ func (h *ChannelsHandlers) Topics(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.Errorf(http.StatusNotFound, "not_found", "channel not found"))
 		return
 	}
-	topics, err := h.DB.ListTopics(r.Context(), cid, uid)
+	q, limit, offset := pageParams(r)
+	topics, more, err := h.DB.ListTopicsPage(r.Context(), cid, uid, q, limit, offset)
 	if err != nil {
 		httpx.WriteError(w, err)
 		return
 	}
-	out := make([]topicDTO, 0, len(topics))
+	out := make([]channelDTO, 0, len(topics))
 	for _, t := range topics {
-		dto := topicDTO{channelDTO: channelToDTO(t)}
-		if h.Indexer != nil {
-			// Sync state is in-memory and per channel id; a topic is a channel
-			// row, so this is the same lookup the detail page does.
-			if st := h.Indexer.SyncStatus(t.ID); st.Running || !st.FinishedAt.IsZero() || st.LastError != "" {
-				s := st
-				dto.Sync = &s
-			}
-		}
-		out = append(out, dto)
+		out = append(out, channelToDTO(t))
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"topics": out})
+	resp := map[string]any{"topics": out, "has_more": more}
+	if offset == 0 {
+		if n, err := h.DB.CountTopicsMatching(r.Context(), cid, uid, q); err == nil {
+			resp["total"] = n
+		}
+	}
+	httpx.WriteJSON(w, http.StatusOK, resp)
+}
+
+// SyncStatuses returns the live sync state of several channels/topics at once.
+//
+// GET /api/channels/sync-status?ids=1,2,3
+//
+// A list page polls this instead of the list itself: re-fetching a paged topic
+// list every two seconds re-downloads and re-renders every loaded row, which is
+// exactly what made the topic page stutter on a phone. Only ids that actually
+// have state (running, finished or failed this process lifetime) are returned.
+func (h *ChannelsHandlers) SyncStatuses(w http.ResponseWriter, r *http.Request) {
+	uid, _ := web.UserIDFromContext(r.Context())
+	var ids []int64
+	for _, part := range strings.Split(r.URL.Query().Get("ids"), ",") {
+		if id, err := strconv.ParseInt(strings.TrimSpace(part), 10, 64); err == nil && id > 0 {
+			ids = append(ids, id)
+		}
+		if len(ids) >= 500 {
+			break
+		}
+	}
+	states := map[int64]indexer.SyncState{}
+	if h.Indexer == nil || len(ids) == 0 {
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{"states": states})
+		return
+	}
+	// The states live in memory keyed only by channel id — scope to the user's
+	// own rows before reading any of them.
+	owned, err := h.DB.OwnedChannelIDs(r.Context(), uid, ids)
+	if err != nil {
+		httpx.WriteError(w, err)
+		return
+	}
+	for _, id := range owned {
+		if st := h.Indexer.SyncStatus(id); st.Running || !st.FinishedAt.IsZero() || st.LastError != "" {
+			states[id] = st
+		}
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"states": states})
 }
 
 // TopicsRefresh re-enumerates a forum group's topics from Telegram. Cheap
@@ -291,7 +331,8 @@ func (h *ChannelsHandlers) Streamers(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, httpx.Errorf(http.StatusNotFound, "not_found", "channel not found"))
 		return
 	}
-	rows, err := h.DB.ListStreamers(r.Context(), cid, uid)
+	q, limit, offset := pageParams(r)
+	rows, more, err := h.DB.ListStreamers(r.Context(), cid, uid, q, limit, offset)
 	if err != nil {
 		httpx.WriteError(w, err)
 		return
@@ -300,7 +341,13 @@ func (h *ChannelsHandlers) Streamers(w http.ResponseWriter, r *http.Request) {
 	for _, s := range rows {
 		out = append(out, streamerDTO{Streamer: s.Streamer, Count: s.Count})
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"streamers": out})
+	resp := map[string]any{"streamers": out, "has_more": more}
+	if offset == 0 {
+		if n, err := h.DB.CountStreamers(r.Context(), cid, uid, q); err == nil {
+			resp["total"] = n
+		}
+	}
+	httpx.WriteJSON(w, http.StatusOK, resp)
 }
 
 // List returns the current user's channels for browsing/management. Forum
@@ -314,7 +361,10 @@ func (h *ChannelsHandlers) List(w http.ResponseWriter, r *http.Request) {
 			opt.SessionID = sid
 		}
 	}
-	chs, err := h.DB.ListChannels(r.Context(), opt)
+	// Without ?limit this stays the full list: the home page and the search
+	// page's channel dropdown both need every row.
+	opt.Q, opt.Limit, opt.Offset = pageParams(r)
+	chs, more, err := h.DB.ListChannels(r.Context(), opt)
 	if err != nil {
 		httpx.WriteError(w, err)
 		return
@@ -327,12 +377,9 @@ func (h *ChannelsHandlers) List(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]channelDTO, 0, len(chs))
 	for _, c := range chs {
-		// Only broadcast channels and supergroups are browsable at this level.
-		// Topic rows are reached through their group's topic list instead, and
-		// basic groups / private chats stay hidden.
-		if c.DialogKind != db.DialogKindChannel && c.DialogKind != db.DialogKindMegagroup {
-			continue
-		}
+		// Only broadcast channels and supergroups come back from ListChannels
+		// (the filter is in SQL so paging stays exact); topic rows are reached
+		// through their group's topic list instead.
 		dto := channelToDTO(c)
 		if st, ok := topicStats[c.ID]; ok {
 			dto.TopicCount = st.Topics
@@ -341,7 +388,16 @@ func (h *ChannelsHandlers) List(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, dto)
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"channels": out})
+	resp := map[string]any{"channels": out}
+	if opt.Limit > 0 {
+		resp["has_more"] = more
+		if opt.Offset == 0 {
+			if n, err := h.DB.CountChannels(r.Context(), opt); err == nil {
+				resp["total"] = n
+			}
+		}
+	}
+	httpx.WriteJSON(w, http.StatusOK, resp)
 }
 
 // videoDTO mirrors the JSON-export field names (snake_case) so frontend can

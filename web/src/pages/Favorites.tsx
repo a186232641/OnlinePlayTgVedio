@@ -158,6 +158,9 @@ export function Favorites() {
       <MediaBrowser
         items={items}
         isLoading={q.isLoading}
+        hasMore={!!q.hasNextPage}
+        loadingMore={q.isFetchingNextPage}
+        onLoadMore={q.fetchNextPage}
         linkTo={linkTo}
         sources={sources}
         emptyLabel={filtered ? "无匹配收藏" : "暂无收藏 — 播放页或图片查看器里点「收藏」即可加入"}

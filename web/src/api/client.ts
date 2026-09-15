@@ -161,12 +161,6 @@ export interface SyncState {
   finished_at?: string;
 }
 
-// A topic is a channel row; the list endpoint attaches its live sync state so
-// the page can poll one URL instead of one per topic.
-export interface Topic extends Channel {
-  sync?: SyncState;
-}
-
 export interface TgSession {
   id: number;
   phone?: string;

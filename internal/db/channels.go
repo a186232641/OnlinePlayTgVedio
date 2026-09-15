@@ -143,36 +143,93 @@ func (d *DB) MarkChannelIndexed(ctx context.Context, channelID int64) error {
 type ListChannelsOpts struct {
 	UserID    int64
 	SessionID int64 // 0 = all sessions for this user
+
+	// Q filters by title (ILIKE). Limit > 0 turns on paging; 0 keeps the old
+	// "everything" behaviour, which the home page and the search dropdown rely on.
+	Q      string
+	Limit  int
+	Offset int
 }
 
-func (d *DB) ListChannels(ctx context.Context, opt ListChannelsOpts) ([]Channel, error) {
+// ListChannels lists the browsable channels (broadcast channels and supergroups;
+// topic rows, basic groups and private chats are excluded).
+//
+// The kind filter is in SQL rather than in the handler: with paging on, filtering
+// after the LIMIT would hand out short pages and make "has more" lie.
+//
+// Paging here is limit/offset, deliberately not the offset_id keyset the media
+// lists use. The sort key (last_indexed_at) moves whenever a sync finishes, so a
+// keyset gains no correctness over an offset, and these lists are at most a few
+// thousand rows — the case keyset exists for is million-row media tables.
+func (d *DB) ListChannels(ctx context.Context, opt ListChannelsOpts) ([]Channel, bool, error) {
 	q := `
         SELECT ` + channelCols + `
         FROM channels c
         JOIN tg_sessions s ON s.id = c.tg_session_id
         WHERE c.user_id=$1 AND s.status <> 'revoked'
+          AND c.dialog_kind IN ($2, $3)
     `
-	args := []any{opt.UserID}
+	args := []any{opt.UserID, DialogKindChannel, DialogKindMegagroup}
 	if opt.SessionID != 0 {
 		args = append(args, opt.SessionID)
-		q += ` AND c.tg_session_id=$2`
+		q += ` AND c.tg_session_id=$` + itoa(len(args))
 	}
-	q += ` ORDER BY c.last_indexed_at DESC NULLS LAST, c.title`
+	if opt.Q != "" {
+		args = append(args, "%"+opt.Q+"%")
+		q += ` AND c.title ILIKE $` + itoa(len(args))
+	}
+	q += ` ORDER BY c.last_indexed_at DESC NULLS LAST, c.title, c.id`
+	q, args = appendPage(q, args, opt.Limit, opt.Offset)
 
 	rows, err := d.Query(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 	var out []Channel
 	for rows.Next() {
 		c, err := scanChannel(rows)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		out = append(out, *c)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	out, more := trimPage(out, opt.Limit)
+	return out, more, nil
+}
+
+// appendPage adds LIMIT/OFFSET for limit > 0, fetching one extra row so the
+// caller can tell whether another page exists without a COUNT.
+func appendPage(q string, args []any, limit, offset int) (string, []any) {
+	if limit <= 0 {
+		return q, args
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	args = append(args, limit+1, offset)
+	return q + ` LIMIT $` + itoa(len(args)-1) + ` OFFSET $` + itoa(len(args)), args
+}
+
+// trimPage drops the look-ahead row appendPage asked for and reports whether
+// it was there.
+func trimPage[T any](rows []T, limit int) ([]T, bool) {
+	if limit <= 0 {
+		return rows, false
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if len(rows) > limit {
+		return rows[:limit], true
+	}
+	return rows, false
 }
 
 // AutoSyncRef is the minimal handle the scheduler needs to call SyncStart.
@@ -279,27 +336,58 @@ type StreamerCount struct {
 
 // ListStreamers returns the distinct streamers in a channel with their video
 // counts, busiest first. Backed by idx_videos_channel_streamer.
-func (d *DB) ListStreamers(ctx context.Context, channelID, userID int64) ([]StreamerCount, error) {
-	rows, err := d.Query(ctx, `
+//
+// q matches the streamer name; the NULL bucket (filenames not matching the
+// pattern) is shown as "其它" in the UI, so a search for that word finds it too.
+// Paging is limit/offset: these are GROUP BY rows with no id to key on.
+func (d *DB) ListStreamers(ctx context.Context, channelID, userID int64, q string, limit, offset int) ([]StreamerCount, bool, error) {
+	sql := `
         SELECT COALESCE(streamer, ''), count(*)
         FROM videos
         WHERE channel_id=$1 AND user_id=$2
-        GROUP BY streamer
-        ORDER BY count(*) DESC, COALESCE(streamer, '')
-    `, channelID, userID)
+    `
+	args := []any{channelID, userID}
+	if q != "" {
+		args = append(args, "%"+q+"%")
+		n := itoa(len(args))
+		sql += ` AND (streamer ILIKE $` + n + ` OR (streamer IS NULL AND '其它' ILIKE $` + n + `))`
+	}
+	sql += ` GROUP BY streamer ORDER BY count(*) DESC, COALESCE(streamer, '')`
+	sql, args = appendPage(sql, args, limit, offset)
+
+	rows, err := d.Query(ctx, sql, args...)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 	var out []StreamerCount
 	for rows.Next() {
 		var s StreamerCount
 		if err := rows.Scan(&s.Streamer, &s.Count); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		out = append(out, s)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	out, more := trimPage(out, limit)
+	return out, more, nil
+}
+
+// CountStreamers is the number of streamer buckets (matching q) in a channel —
+// the badge total, asked only on a list's first page.
+func (d *DB) CountStreamers(ctx context.Context, channelID, userID int64, q string) (int64, error) {
+	sql := `SELECT count(*) FROM (SELECT 1 FROM videos WHERE channel_id=$1 AND user_id=$2`
+	args := []any{channelID, userID}
+	if q != "" {
+		args = append(args, "%"+q+"%")
+		sql += ` AND (streamer ILIKE $3 OR (streamer IS NULL AND '其它' ILIKE $3))`
+	}
+	sql += ` GROUP BY streamer) t`
+	var n int64
+	err := d.QueryRow(ctx, sql, args...).Scan(&n)
+	return n, err
 }
 
 func (d *DB) UpdateChannelPhoto(ctx context.Context, channelID int64, path string) error {
@@ -335,6 +423,102 @@ func (d *DB) ListTopics(ctx context.Context, parentID, userID int64) ([]Channel,
 			return nil, err
 		}
 		out = append(out, *c)
+	}
+	return out, rows.Err()
+}
+
+// ListTopicsPage is the browsing version of ListTopics: title search plus
+// limit/offset paging, topics holding the most media first (a forum can have
+// thousands of topics, and loading every one up front is what made the page
+// crawl on a phone). Unsynced topics trail, newest first.
+func (d *DB) ListTopicsPage(ctx context.Context, parentID, userID int64, q string, limit, offset int) ([]Channel, bool, error) {
+	sql := `
+        SELECT ` + channelCols + `
+        FROM channels c
+        WHERE c.parent_channel_id=$1 AND c.user_id=$2 AND c.dialog_kind=$3
+    `
+	args := []any{parentID, userID, DialogKindTopic}
+	if q != "" {
+		args = append(args, "%"+q+"%")
+		sql += ` AND c.title ILIKE $` + itoa(len(args))
+	}
+	sql += ` ORDER BY (c.video_count + c.photo_count) DESC, c.id DESC`
+	sql, args = appendPage(sql, args, limit, offset)
+
+	rows, err := d.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	var out []Channel
+	for rows.Next() {
+		c, err := scanChannel(rows)
+		if err != nil {
+			return nil, false, err
+		}
+		out = append(out, *c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	out, more := trimPage(out, limit)
+	return out, more, nil
+}
+
+// CountTopicsMatching is CountTopics with the same title filter as
+// ListTopicsPage, for the first-page total.
+func (d *DB) CountTopicsMatching(ctx context.Context, parentID, userID int64, q string) (int64, error) {
+	sql := `SELECT count(*) FROM channels WHERE parent_channel_id=$1 AND user_id=$2 AND dialog_kind=$3`
+	args := []any{parentID, userID, DialogKindTopic}
+	if q != "" {
+		args = append(args, "%"+q+"%")
+		sql += ` AND title ILIKE $4`
+	}
+	var n int64
+	err := d.QueryRow(ctx, sql, args...).Scan(&n)
+	return n, err
+}
+
+// CountChannels is the first-page total for a filtered ListChannels.
+func (d *DB) CountChannels(ctx context.Context, opt ListChannelsOpts) (int64, error) {
+	sql := `
+        SELECT count(*) FROM channels c
+        JOIN tg_sessions s ON s.id = c.tg_session_id
+        WHERE c.user_id=$1 AND s.status <> 'revoked' AND c.dialog_kind IN ($2, $3)
+    `
+	args := []any{opt.UserID, DialogKindChannel, DialogKindMegagroup}
+	if opt.SessionID != 0 {
+		args = append(args, opt.SessionID)
+		sql += ` AND c.tg_session_id=$` + itoa(len(args))
+	}
+	if opt.Q != "" {
+		args = append(args, "%"+opt.Q+"%")
+		sql += ` AND c.title ILIKE $` + itoa(len(args))
+	}
+	var n int64
+	err := d.QueryRow(ctx, sql, args...).Scan(&n)
+	return n, err
+}
+
+// OwnedChannelIDs returns the subset of ids that belong to the user. Used to
+// scope the batch sync-status endpoint, whose data lives in memory keyed only
+// by channel id.
+func (d *DB) OwnedChannelIDs(ctx context.Context, userID int64, ids []int64) ([]int64, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	rows, err := d.Query(ctx, `SELECT id FROM channels WHERE user_id=$1 AND id = ANY($2)`, userID, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
 	}
 	return out, rows.Err()
 }

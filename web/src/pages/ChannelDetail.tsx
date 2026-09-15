@@ -1,17 +1,18 @@
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-import { api, Channel, MediaItem, MediaKindFilter, Streamer, SyncState, Topic } from "../api/client";
+import { api, Channel, MediaItem, MediaKindFilter, Streamer, SyncState } from "../api/client";
 import { MEDIA_PAGE_SIZE, normalizeKind, useMediaPages } from "../api/media";
+import { LIST_PAGE_SIZE, useDebounced, usePagedList, useSyncStatuses } from "../api/paged";
 import { KindTabs, MediaBrowser } from "../components/MediaBrowser";
 import { SortSelect, DEFAULT_SORT, normalizeSort } from "../components/SortSelect";
 import { ChevronLeftIcon, ChevronRightIcon, RefreshIcon, SearchIcon, TopicsIcon, TrashIcon } from "../components/icons";
 import { AlertStrip, EmptyState, LoadingState, MoreFooter, PageHeader, Toggle } from "../components/ui";
 
 interface ChannelResp { channel: Channel }
-interface StreamersResp { streamers: Streamer[] }
-interface TopicsResp { topics: Topic[] }
+interface StreamersResp { streamers: Streamer[]; has_more?: boolean; total?: number }
+interface TopicsResp { topics: Channel[]; has_more?: boolean; total?: number }
 
 export function ChannelDetail() {
   const { id } = useParams();
@@ -135,13 +136,28 @@ function TopicList({ id, channel }: { id: string; channel?: Channel }) {
     onError: (e: Error) => alert(e.message),
   });
 
-  const q = useQuery<TopicsResp>({
-    queryKey: ["channel", id, "topics"],
-    queryFn: () => api.get(`/api/channels/${id}/topics`),
-    // Poll only while something is actually running.
-    refetchInterval: (query) =>
-      (query.state.data?.topics ?? []).some((t) => t.sync?.running) ? 2000 : false,
+  // Search goes to the server (debounced) and the list pages: a forum can have
+  // thousands of topics, and rendering every one of them up front — then
+  // re-fetching the lot every 2s while a sync ran — is what made this page crawl
+  // on a phone.
+  const debounced = useDebounced(filter.trim());
+  const { query: q, items: list, total } = usePagedList<Channel, TopicsResp>({
+    key: ["channel", id, "topics", debounced],
+    path: `/api/channels/${id}/topics`,
+    params: new URLSearchParams(debounced ? { q: debounced } : {}),
+    pick: (r) => r.topics,
+    keyOf: (t) => t.id,
   });
+
+  // Live progress for the group and every loaded topic, in one polled request.
+  const statusIds = useMemo(() => [Number(id), ...list.map((t) => t.id)], [id, list]);
+  const { states, anyRunning } = useSyncStatuses(statusIds, () => {
+    // A sync just ended somewhere on this page: its counts (and so its place in
+    // the most-media-first order) changed.
+    qc.invalidateQueries({ queryKey: ["channel", id, "topics"] });
+    qc.invalidateQueries({ queryKey: ["channel", id], exact: true });
+  });
+  const groupSync = states[id];
 
   const refresh = useMutation({
     mutationFn: () => api.post<{ topics: number }>(`/api/channels/${id}/topics/refresh`),
@@ -155,17 +171,11 @@ function TopicList({ id, channel }: { id: string; channel?: Channel }) {
   // Group-level sync: refresh the topic list, then walk every topic in turn.
   const syncAll = useMutation({
     mutationFn: () => api.post<SyncState>(`/api/channels/${id}/sync`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["channel", id, "topics"] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["sync-statuses"] }),
     onError: (e: Error) => alert(`同步启动失败: ${e.message}`),
   });
 
-  const list = q.data?.topics ?? [];
-  const visible = filter
-    ? list.filter((t) => t.title.toLowerCase().includes(filter.toLowerCase()))
-    : list;
-  const anyRunning = list.some((t) => t.sync?.running);
-
-  if (q.isLoading) return <LoadingState />;
+  if (q.isLoading && !debounced) return <LoadingState />;
 
   return (
     <div className="space-y-5">
@@ -174,12 +184,12 @@ function TopicList({ id, channel }: { id: string; channel?: Channel }) {
           <SearchIcon className="pointer-events-none absolute left-3.5 top-1/2 size-5 -translate-y-1/2 text-gray-400" />
           <input
             className="field pl-11"
-            placeholder="过滤话题…"
+            placeholder="搜索话题…"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
           />
         </div>
-        <span className="badge badge-gray">{list.length} 个话题</span>
+        <span className="badge badge-gray">{(total ?? list.length).toLocaleString()} 个话题</span>
         <button
           onClick={() => refresh.mutate()}
           disabled={refresh.isPending}
@@ -198,6 +208,12 @@ function TopicList({ id, channel }: { id: string; channel?: Channel }) {
           <RefreshIcon className="size-4" />
           同步全部话题
         </button>
+        {groupSync?.running && (
+          <div className="w-full text-theme-xs text-warning-600 dark:text-warning-400">
+            {groupSync.phase && groupSync.phase !== "syncing" && `${groupSync.phase} · `}
+            全部话题同步中:已遍历 {groupSync.walked} · 视频 {groupSync.videos} · 图片 {groupSync.photos}
+          </div>
+        )}
       </div>
 
       {orphaned > 0 && (
@@ -234,36 +250,50 @@ function TopicList({ id, channel }: { id: string; channel?: Channel }) {
 
       {showOrphaned && <MediaView id={id} channel={channel} />}
 
-      {list.length === 0 ? (
-        <EmptyState
-          title="还没有话题"
-          hint="点「刷新话题」从 Telegram 拉取该群组的话题列表,然后对感兴趣的话题单独点「同步」把里面的图片和视频入库。"
-        />
-      ) : visible.length === 0 ? (
-        <EmptyState title="没有匹配的话题" />
+      {q.isLoading ? (
+        <LoadingState label="搜索中…" />
+      ) : list.length === 0 ? (
+        debounced ? (
+          <EmptyState title="没有匹配的话题" />
+        ) : (
+          <EmptyState
+            title="还没有话题"
+            hint="点「刷新话题」从 Telegram 拉取该群组的话题列表,然后对感兴趣的话题单独点「同步」把里面的图片和视频入库。"
+          />
+        )
       ) : (
         <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 3xl:grid-cols-3">
-          {visible.map((t) => (
-            <TopicCard key={t.id} topic={t} />
+          {list.map((t) => (
+            <TopicCard key={t.id} topic={t} sync={states[t.id]} groupId={id} />
           ))}
         </div>
       )}
+
+      <MoreFooter
+        hasNextPage={!!q.hasNextPage}
+        isFetchingNextPage={q.isFetchingNextPage}
+        fetchNextPage={q.fetchNextPage}
+        doneLabel="已加载全部话题"
+        loaded={list.length}
+        pageSize={LIST_PAGE_SIZE}
+      />
     </div>
   );
 }
 
 // TopicCard: the body navigates into the topic, the controls act on it in place.
-function TopicCard({ topic }: { topic: Topic }) {
+function TopicCard({ topic, sync: st, groupId }: { topic: Channel; sync?: SyncState; groupId: string }) {
   const qc = useQueryClient();
-  const running = !!topic.sync?.running;
+  const running = !!st?.running;
 
   const invalidate = () => {
-    qc.invalidateQueries({ queryKey: ["channel", String(topic.parent_channel_id), "topics"] });
+    qc.invalidateQueries({ queryKey: ["channel", groupId, "topics"] });
   };
 
   const sync = useMutation({
     mutationFn: () => api.post<SyncState>(`/api/channels/${topic.id}/sync`),
-    onSuccess: invalidate,
+    // Start polling right away rather than waiting for the next list refresh.
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["sync-statuses"] }),
     onError: (e: Error) => alert(`同步启动失败: ${e.message}`),
   });
   const autoSync = useMutation({
@@ -276,8 +306,8 @@ function TopicCard({ topic }: { topic: Topic }) {
     topic.video_count > 0 && `${topic.video_count.toLocaleString()} 视频`,
     topic.photo_count > 0 && `${topic.photo_count.toLocaleString()} 图片`,
   ].filter(Boolean) as string[];
-  const err = topic.sync?.last_error;
-  const note = topic.sync?.note;
+  const err = st?.last_error;
+  const note = st?.note;
 
   return (
     <div className="card flex flex-col gap-3 p-4">
@@ -301,8 +331,8 @@ function TopicCard({ topic }: { topic: Topic }) {
 
       {running && (
         <div className="text-theme-xs text-warning-600 dark:text-warning-400">
-          同步中:已遍历 {topic.sync?.walked ?? 0} · 视频 {topic.sync?.videos ?? 0} · 图片{" "}
-          {topic.sync?.photos ?? 0} · 跳过 {topic.sync?.skipped ?? 0}
+          同步中:已遍历 {st?.walked ?? 0} · 视频 {st?.videos ?? 0} · 图片{" "}
+          {st?.photos ?? 0} · 跳过 {st?.skipped ?? 0}
         </div>
       )}
       {!running && err && (
@@ -480,6 +510,9 @@ function MediaView({ id, channel }: { id: string; channel?: Channel }) {
           items={items}
           isLoading={q.isLoading}
           linkTo={linkTo}
+          hasMore={!!q.hasNextPage}
+          loadingMore={q.isFetchingNextPage}
+          onLoadMore={q.fetchNextPage}
           emptyLabel={query ? "无匹配结果" : "暂无内容"}
         />
       )}
@@ -500,17 +533,19 @@ function MediaView({ id, channel }: { id: string; channel?: Channel }) {
 // Grouping is a videos-only filename convention, so images are out of scope here.
 function StreamerList({ id, onPick }: { id: string; onPick: (s: string) => void }) {
   const [filter, setFilter] = useState("");
-  const q = useQuery<StreamersResp>({
-    queryKey: ["channel", id, "streamers"],
-    queryFn: () => api.get(`/api/channels/${id}/streamers`),
+  // Server-side search + paging: a channel following the
+  // "{streamer}-DATE" convention can have thousands of streamers.
+  const debounced = useDebounced(filter.trim());
+  const { query: q, items: list, total } = usePagedList<Streamer, StreamersResp>({
+    key: ["channel", id, "streamers", debounced],
+    path: `/api/channels/${id}/streamers`,
+    params: new URLSearchParams(debounced ? { q: debounced } : {}),
+    pick: (r) => r.streamers,
+    keyOf: (s) => s.streamer,
   });
-  const list = q.data?.streamers ?? [];
-  const visible = filter
-    ? list.filter((s) => (s.streamer || "其它").toLowerCase().includes(filter.toLowerCase()))
-    : list;
 
-  if (q.isLoading) return <LoadingState />;
-  if (list.length === 0) return <EmptyState title="暂无视频" />;
+  if (q.isLoading && !debounced) return <LoadingState />;
+  if (!debounced && list.length === 0) return <EmptyState title="暂无视频" />;
 
   return (
     <div className="space-y-5">
@@ -519,19 +554,21 @@ function StreamerList({ id, onPick }: { id: string; onPick: (s: string) => void 
           <SearchIcon className="pointer-events-none absolute left-3.5 top-1/2 size-5 -translate-y-1/2 text-gray-400" />
           <input
             className="field pl-11"
-            placeholder="过滤主播…"
+            placeholder="搜索主播…"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
           />
         </div>
-        <span className="badge badge-gray">{list.length} 位主播</span>
+        <span className="badge badge-gray">{(total ?? list.length).toLocaleString()} 位主播</span>
       </div>
 
-      {visible.length === 0 ? (
+      {q.isLoading ? (
+        <LoadingState label="搜索中…" />
+      ) : list.length === 0 ? (
         <EmptyState title="没有匹配的主播" />
       ) : (
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
-          {visible.map((s) => (
+          {list.map((s) => (
             <button
               key={s.streamer || "__other__"}
               onClick={() => onPick(s.streamer)}
@@ -547,6 +584,15 @@ function StreamerList({ id, onPick }: { id: string; onPick: (s: string) => void 
           ))}
         </div>
       )}
+
+      <MoreFooter
+        hasNextPage={!!q.hasNextPage}
+        isFetchingNextPage={q.isFetchingNextPage}
+        fetchNextPage={q.fetchNextPage}
+        doneLabel="已加载全部主播"
+        loaded={list.length}
+        pageSize={LIST_PAGE_SIZE}
+      />
     </div>
   );
 }

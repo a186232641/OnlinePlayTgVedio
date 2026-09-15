@@ -84,6 +84,8 @@ func NewRouter(d Deps) http.Handler {
 
 			r.Route("/channels", func(r chi.Router) {
 				r.Get("/", chH.List)
+				// Static segment: chi matches it before the /{id} routes below.
+				r.Get("/sync-status", chH.SyncStatuses)
 				r.Get("/{id}", chH.Get)
 				r.Patch("/{id}", chH.UpdateChannel)
 				r.Get("/{id}/videos", chH.ChannelVideos)

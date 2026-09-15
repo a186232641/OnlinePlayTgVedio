@@ -238,6 +238,28 @@ item because a page usually comes from a handful of channels. In `MediaGrid` tho
 **beside** the clickable tile, never inside it — an `<a>` nested in an `<a>`/`<button>` is invalid
 and the inner click gets swallowed.
 
+**Small lists page with limit/offset, not the keyset.** Topics (`GET /channels/{id}/topics`),
+streamers (`/streamers`) and a session's channels (`GET /channels/?session_id=&limit=`) take
+`?q=&limit=&offset=` and answer `has_more` (+ `total` on the first page); search runs server-side,
+debounced in the UI (`api/paged.ts` → `usePagedList`). This is a deliberate exception to the
+`offset_id` keyset: their sort keys (media counts, `last_indexed_at`) move while a sync runs, so a
+keyset gains nothing, streamer rows are GROUP BY aggregates with no id at all, and they are
+thousands of rows, not millions. The frontend dedupes by key because a row can shift across a page
+boundary mid-sync. `GET /channels/` **without** `limit` still returns everything — the home page
+and the search dropdown need the full list. The dialog-kind filter lives in SQL, not the handler,
+or paged results would come up short.
+
+**Live sync progress for a list is one batched poll**: `GET /channels/sync-status?ids=…`
+(`useSyncStatuses`), polling only while something reports running. Both earlier patterns hurt on
+a phone — re-fetching the whole list every 2s re-rendered every row, and a status query per row
+cost a request per row on page load. States are in memory keyed by channel id, so the handler
+scopes the ids to the user (`OwnedChannelIDs`) before reading any.
+
+The image viewer (`Lightbox`) gets the list's paging from `MediaBrowser` and **keeps going past the
+loaded page** like the video playlist: stepping past the last loaded image fetches the next page
+and continues (bounded retries across pages that hold only videos), it prefetches when within 3 of
+the end, preloads both neighbours, and supports horizontal swipe on touch screens.
+
 `channels.video_count` / `photo_count` are what the list endpoints report as totals, not a live
 `COUNT(*)`: on a million-row channel counting twice per first page costs hundreds of milliseconds
 to render a number that only changes when a sync finishes. `MarkChannelIndexed` recomputes them

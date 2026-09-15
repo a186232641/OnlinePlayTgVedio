@@ -459,6 +459,73 @@ func TestIntegration(t *testing.T) {
 		t.Fatalf("video thumb path not cleared: %q", v.ThumbPath)
 	}
 
+	// --- paged + searched lists ---------------------------------------------
+	// A second, empty topic so there is something to page past and to sort
+	// behind the one holding media.
+	emptyNo := int32(8)
+	emptyTopic, err := d.UpsertChannel(ctx, &Channel{
+		UserID: uid, TGSessionID: sid, TGChannelID: 111, AccessHash: 222,
+		Title: "空话题", DialogKind: DialogKindTopic, ParentChannelID: &forumID, TopicID: &emptyNo,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MarkChannelIndexed(ctx, topicID); err != nil {
+		t.Fatal(err)
+	}
+	page1, more, err := d.ListTopicsPage(ctx, forumID, uid, "", 1, 0)
+	if err != nil || len(page1) != 1 || !more || page1[0].ID != topicID {
+		t.Fatalf("topics page 1 = %d rows more=%v err=%v (want the media-holding topic first)", len(page1), more, err)
+	}
+	page2, more, err := d.ListTopicsPage(ctx, forumID, uid, "", 1, 1)
+	if err != nil || len(page2) != 1 || more || page2[0].ID != emptyTopic {
+		t.Fatalf("topics page 2 = %+v more=%v err=%v", page2, more, err)
+	}
+	if hits, _, err := d.ListTopicsPage(ctx, forumID, uid, "空", 50, 0); err != nil || len(hits) != 1 || hits[0].ID != emptyTopic {
+		t.Fatalf("topic title search = %d rows, %v", len(hits), err)
+	}
+	if n, err := d.CountTopicsMatching(ctx, forumID, uid, "空"); err != nil || n != 1 {
+		t.Fatalf("CountTopicsMatching = %d, %v", n, err)
+	}
+	if all, _, err := d.ListTopicsPage(ctx, forumID, uid, "", 0, 0); err != nil || len(all) != 2 {
+		t.Fatalf("unpaged topics = %d, %v", len(all), err)
+	}
+
+	// Streamers: the 5 "anchor-…" videos plus 20 "batch.mp4" rows in the NULL
+	// bucket, which the UI calls 其它 — and a search for that word must find it.
+	st1, more, err := d.ListStreamers(ctx, topicID, uid, "", 1, 0)
+	if err != nil || len(st1) != 1 || !more {
+		t.Fatalf("streamers page 1 = %+v more=%v err=%v", st1, more, err)
+	}
+	if other, _, err := d.ListStreamers(ctx, topicID, uid, "其它", 50, 0); err != nil || len(other) != 1 || other[0].Streamer != "" {
+		t.Fatalf("search for 其它 = %+v, %v", other, err)
+	}
+	if n, err := d.CountStreamers(ctx, topicID, uid, ""); err != nil || n != 2 {
+		t.Fatalf("CountStreamers = %d, %v", n, err)
+	}
+
+	// Channels: topics and other kinds never appear, even unpaged.
+	chs, _, err := d.ListChannels(ctx, ListChannelsOpts{UserID: uid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range chs {
+		if c.DialogKind != DialogKindChannel && c.DialogKind != DialogKindMegagroup {
+			t.Fatalf("ListChannels leaked a %s row", c.DialogKind)
+		}
+	}
+	if hits, more, err := d.ListChannels(ctx, ListChannelsOpts{UserID: uid, Q: "群", Limit: 10}); err != nil || len(hits) != 1 || more {
+		t.Fatalf("channel search = %d rows more=%v err=%v", len(hits), more, err)
+	}
+	if n, err := d.CountChannels(ctx, ListChannelsOpts{UserID: uid, Q: "群"}); err != nil || n != 1 {
+		t.Fatalf("CountChannels = %d, %v", n, err)
+	}
+
+	// Batch sync-status scoping: foreign ids are dropped.
+	if owned, err := d.OwnedChannelIDs(ctx, uid, []int64{topicID, 999999}); err != nil || len(owned) != 1 || owned[0] != topicID {
+		t.Fatalf("OwnedChannelIDs = %v, %v", owned, err)
+	}
+
 	// --- clearing a channel wipes both tables ------------------------------
 	nv, err := d.DeleteVideosByChannel(ctx, uid, topicID)
 	if err != nil {

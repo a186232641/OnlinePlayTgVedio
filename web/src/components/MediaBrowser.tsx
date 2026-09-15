@@ -67,12 +67,19 @@ export function MediaBrowser({
   linkTo,
   sources,
   emptyLabel,
+  hasMore,
+  loadingMore,
+  onLoadMore,
 }: {
   items: MediaItem[];
   isLoading?: boolean;
   linkTo?: (m: MediaItem) => string;
   sources?: Record<string, MediaSource>;
   emptyLabel?: string;
+  // The list's paging, so the image viewer can keep going past the loaded page.
+  hasMore?: boolean;
+  loadingMore?: boolean;
+  onLoadMore?: () => void;
 }) {
   const photos = useMemo(() => items.filter((i) => i.kind === "photo"), [items]);
   const [openIdx, setOpenIdx] = useState<number | null>(null);
@@ -96,6 +103,9 @@ export function MediaBrowser({
           index={openIdx}
           onIndex={setOpenIdx}
           onClose={() => setOpenIdx(null)}
+          hasMore={hasMore}
+          loadingMore={loadingMore}
+          onLoadMore={onLoadMore}
         />
       )}
     </>

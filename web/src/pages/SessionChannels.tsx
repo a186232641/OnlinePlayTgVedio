@@ -1,10 +1,11 @@
 import { Link, useParams } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMemo, useRef, useState } from "react";
 
-import { api, Channel } from "../api/client";
+import { api, Channel, SyncState } from "../api/client";
+import { LIST_PAGE_SIZE, useDebounced, usePagedList, useSyncStatuses } from "../api/paged";
 import { ChevronLeftIcon, RefreshIcon, SearchIcon, TrashIcon, UploadIcon } from "../components/icons";
-import { AlertStrip, LoadingState, PageHeader, Toggle } from "../components/ui";
+import { AlertStrip, LoadingState, MoreFooter, PageHeader, Toggle } from "../components/ui";
 
 interface ImportResp {
   ok: boolean;
@@ -15,21 +16,7 @@ interface ImportResp {
   skip_by?: Record<string, number>;
 }
 
-interface SyncState {
-  running: boolean;
-  // "syncing" | "topics" | "话题 3/12: …" — a forum group's sync reports which
-  // topic it is on.
-  phase?: string;
-  walked: number;
-  imported: number;
-  videos: number;
-  photos: number;
-  skipped: number;
-  note?: string;
-  last_error?: string;
-  started_at?: string;
-  finished_at?: string;
-}
+interface ChannelsResp { channels: Channel[]; has_more?: boolean; total?: number }
 
 async function uploadJsonImport(channelId: number, file: File): Promise<ImportResp> {
   const fd = new FormData();
@@ -66,10 +53,21 @@ export function SessionChannels() {
   const qc = useQueryClient();
   const [filter, setFilter] = useState("");
 
-  const q = useQuery<{ channels: Channel[] }>({
-    queryKey: ["channels", "session", sessionId],
-    queryFn: () => api.get(`/api/channels/?session_id=${sessionId}`),
+  // Server-side search + paging: an account can sit in thousands of channels,
+  // and this page used to render all of them (plus a status request per row)
+  // before showing anything.
+  const debounced = useDebounced(filter.trim());
+  const { query: q, items: list, total } = usePagedList<Channel, ChannelsResp>({
+    key: ["channels", "session", sessionId, debounced],
+    path: `/api/channels/`,
+    params: new URLSearchParams({ session_id: String(sessionId), ...(debounced ? { q: debounced } : {}) }),
+    pick: (r) => r.channels,
+    keyOf: (c) => c.id,
   });
+  const statusIds = useMemo(() => list.map((c) => c.id), [list]);
+  const { states } = useSyncStatuses(statusIds, () =>
+    qc.invalidateQueries({ queryKey: ["channels", "session", sessionId] }),
+  );
 
   const importJson = useMutation({
     mutationFn: ({ cid, file }: { cid: number; file: File }) => uploadJsonImport(cid, file),
@@ -93,21 +91,18 @@ export function SessionChannels() {
   });
   const syncStart = useMutation({
     mutationFn: (cid: number) => api.post<SyncState>(`/api/channels/${cid}/sync`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["sync-statuses"] }),
     onError: (err: Error) => alert(`同步启动失败: ${err.message}`),
   });
   // Re-arms the full-history walk. Needed to pick up media kinds that a channel
   // was already "done" for — images, for a channel synced before image support.
   const backfill = useMutation({
     mutationFn: (cid: number) => api.post<SyncState>(`/api/channels/${cid}/backfill`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["sync-statuses"] }),
     onError: (err: Error) => alert(`回填启动失败: ${err.message}`),
   });
 
-  const list = q.data?.channels ?? [];
-  const visible = filter
-    ? list.filter((c) => c.title.toLowerCase().includes(filter.toLowerCase()))
-    : list;
-
-  if (q.isLoading) return <LoadingState />;
+  if (q.isLoading && !debounced) return <LoadingState />;
 
   return (
     <div className="mx-auto w-full max-w-[1100px] space-y-5 p-4 md:p-6">
@@ -119,7 +114,7 @@ export function SessionChannels() {
         返回 TG 账号
       </Link>
 
-      <PageHeader title="导入频道视频" meta={`该账号下发现 ${list.length} 个频道`} />
+      <PageHeader title="导入频道视频" meta={`该账号下发现 ${(total ?? list.length).toLocaleString()} 个频道`} />
 
       <AlertStrip tone="info" title="两种入库方式">
         <div className="space-y-1">
@@ -138,7 +133,7 @@ export function SessionChannels() {
         <SearchIcon className="pointer-events-none absolute left-3.5 top-1/2 size-5 -translate-y-1/2 text-gray-400" />
         <input
           className="field pl-11"
-          placeholder="按标题过滤…"
+          placeholder="搜索频道标题…"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
         />
@@ -152,16 +147,19 @@ export function SessionChannels() {
           <span className="w-[360px] text-right">操作</span>
         </div>
 
-        {visible.length === 0 ? (
+        {q.isLoading ? (
+          <LoadingState label="搜索中…" />
+        ) : list.length === 0 ? (
           <div className="px-5 py-12 text-center text-theme-sm text-gray-500 dark:text-gray-400">
-            {list.length === 0 ? "暂无频道,试试在 TG 账号页「重新发现」。" : "没有匹配的频道。"}
+            {debounced ? "没有匹配的频道。" : "暂无频道,试试在 TG 账号页「重新发现」。"}
           </div>
         ) : (
           <div className="divide-y divide-gray-200 dark:divide-gray-800">
-            {visible.map((c) => (
+            {list.map((c) => (
               <ChannelRow
                 key={c.id}
                 c={c}
+                sync={states[c.id]}
                 onImport={(file) => importJson.mutate({ cid: c.id, file })}
                 onClear={() => {
                   if (confirm(`清空 ${c.title} 的所有视频和图片(${c.video_count + c.photo_count} 条)?\n\n收藏会一并删除。常用于"重置后重新导入"。`)) {
@@ -185,14 +183,24 @@ export function SessionChannels() {
           </div>
         )}
       </div>
+
+      <MoreFooter
+        hasNextPage={!!q.hasNextPage}
+        isFetchingNextPage={q.isFetchingNextPage}
+        fetchNextPage={q.fetchNextPage}
+        doneLabel="已加载全部频道"
+        loaded={list.length}
+        pageSize={LIST_PAGE_SIZE}
+      />
     </div>
   );
 }
 
 function ChannelRow({
-  c, onImport, onClear, onSync, onBackfill, importing, clearing,
+  c, sync, onImport, onClear, onSync, onBackfill, importing, clearing,
 }: {
   c: Channel;
+  sync?: SyncState;
   onImport: (file: File) => void;
   onClear: () => void;
   onSync: () => void;
@@ -202,14 +210,11 @@ function ChannelRow({
 }) {
   const qc = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const sync = useQuery<SyncState>({
-    queryKey: ["sync-status", c.id],
-    queryFn: () => api.get(`/api/channels/${c.id}/sync`),
-    refetchInterval: (q) => (q.state.data?.running ? 2000 : false),
-  });
-  const isSyncing = !!sync.data?.running;
-  const lastError = sync.data?.last_error;
-  const note = sync.data?.note;
+  // Live state comes from the page's single batched poll (useSyncStatuses),
+  // not a query per row.
+  const isSyncing = !!sync?.running;
+  const lastError = sync?.last_error;
+  const note = sync?.note;
 
   const autoSync = useMutation({
     mutationFn: (val: boolean) => api.patch(`/api/channels/${c.id}`, { auto_sync: val }),
@@ -238,9 +243,9 @@ function ChannelRow({
 
         {isSyncing && (
           <div className="mt-1 text-theme-xs text-warning-600 dark:text-warning-400">
-            {sync.data?.phase && sync.data.phase !== "syncing" && `${sync.data.phase} · `}
-            正在从 TG 同步:已遍历 {sync.data?.walked ?? 0} · 视频 {sync.data?.videos ?? 0} · 图片{" "}
-            {sync.data?.photos ?? 0} · 跳过 {sync.data?.skipped ?? 0}
+            {sync?.phase && sync.phase !== "syncing" && `${sync.phase} · `}
+            正在从 TG 同步:已遍历 {sync?.walked ?? 0} · 视频 {sync?.videos ?? 0} · 图片{" "}
+            {sync?.photos ?? 0} · 跳过 {sync?.skipped ?? 0}
             <span className="text-gray-400 dark:text-gray-500">
               {" "}(边抓边写,首次大频道可能需多轮,中断会自动续传)
             </span>

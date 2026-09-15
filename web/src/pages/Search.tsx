@@ -177,6 +177,9 @@ export function Search() {
 
           <MediaBrowser
             items={all}
+            hasMore={!!result.hasNextPage}
+            loadingMore={result.isFetchingNextPage}
+            onLoadMore={result.fetchNextPage}
             sources={sources}
             emptyLabel="无匹配结果"
             linkTo={(m) => {
