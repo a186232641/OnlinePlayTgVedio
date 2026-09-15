@@ -133,10 +133,31 @@ export function Player() {
   // and as a dependency for the "scroll-into-view" effect.
   const playlistKey = searchParams.toString();
 
+  const [endedAtPageEnd, setEndedAtPageEnd] = useState(false);
+
   useEffect(() => {
     setMediaErr(null);
     setStreamDiag(null);
     setContainerHint("");
+    setEndedAtPageEnd(false);
+  }, [id]);
+
+  // Bring the player itself into view when the video changes. There is no
+  // scroll reset on navigation anywhere in the app, so opening a tile from far
+  // down a grid — or picking the next item from the playlist, which sits BELOW
+  // the player on a phone — left the page scrolled and the video off-screen.
+  // Only moves when the player is actually out of view, so a desktop user who
+  // scrolled down to read the details isn't yanked on every autoplay step.
+  const playerRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = playerRef.current;
+    if (!el) return;
+    const header = document.querySelector("header");
+    const offset = (header?.getBoundingClientRect().height ?? 0) + 12;
+    const top = el.getBoundingClientRect().top;
+    if (top < offset - 1 || top > window.innerHeight * 0.4) {
+      window.scrollTo({ top: Math.max(0, window.scrollY + top - offset) });
+    }
   }, [id]);
 
   // Position the highlighted item inside the sidebar — but only by setting
@@ -145,11 +166,19 @@ export function Player() {
   // top). Strategy: if the current item's box is already inside the visible
   // window, do nothing. Otherwise center it. Offsets are measured from the
   // client rects so nested markup / positioned ancestors can't skew the math.
+  //
+  // It runs until it has actually positioned the current video, not just once
+  // per id change: on open the playlist is usually still loading, so the row
+  // doesn't exist yet — the old version gave up right there and never tried
+  // again, leaving the list parked at the top. Once positioned for this id it
+  // stops, so loading another page doesn't drag the user's scroll back.
+  const positionedFor = useRef<string | null>(null);
   useEffect(() => {
     const scroller = sidebarRef.current;
-    if (!scroller || !id) return;
+    if (!scroller || !id || positionedFor.current === `${id}|${playlistKey}`) return;
     const el = scroller.querySelector<HTMLElement>(`[data-video-id="${id}"]`);
     if (!el) return;
+    positionedFor.current = `${id}|${playlistKey}`;
     const top =
       el.getBoundingClientRect().top -
       scroller.getBoundingClientRect().top +
@@ -161,7 +190,7 @@ export function Player() {
       return; // already visible — leave the user's scroll position alone
     }
     scroller.scrollTop = Math.max(0, top - scroller.clientHeight / 2 + el.offsetHeight / 2);
-  }, [id, playlistKey]);
+  });
 
   const meta = useQuery<VideoResp>({
     queryKey: ["video", id],
@@ -198,32 +227,11 @@ export function Player() {
   const next = currentIdx >= 0 && currentIdx < list.length - 1 ? list[currentIdx + 1] : null;
   const prev = currentIdx > 0 ? list[currentIdx - 1] : null;
 
-  // Pre-fetch the next page when the current item is within the last 50 of
-  // what's loaded — keeps autoplay smooth across page boundaries.
-  useEffect(() => {
-    if (currentIdx < 0 || !playlist.hasNextPage || playlist.isFetchingNextPage) return;
-    if (currentIdx >= list.length - 50) {
-      playlist.fetchNextPage();
-    }
-  }, [currentIdx, list.length, playlist.hasNextPage, playlist.isFetchingNextPage, playlist.fetchNextPage]);
-
-  // IntersectionObserver at the bottom of the sidebar: load more on scroll.
-  const sentinelRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    const el = sentinelRef.current;
-    const root = sidebarRef.current;
-    if (!el || !root) return;
-    const obs = new IntersectionObserver(
-      (entries) => {
-        if (entries[0]?.isIntersecting && playlist.hasNextPage && !playlist.isFetchingNextPage) {
-          playlist.fetchNextPage();
-        }
-      },
-      { root, rootMargin: "200px" },
-    );
-    obs.observe(el);
-    return () => obs.disconnect();
-  }, [playlist.hasNextPage, playlist.isFetchingNextPage, playlist.fetchNextPage, list.length]);
+  // No automatic paging here: the next page loads only from the button at the
+  // bottom of the playlist. (It used to prefetch near the end and on scroll.)
+  // Autoplay therefore stops at the last loaded video instead of silently
+  // pulling another 500 rows.
+  const atLoadedEnd = currentIdx >= 0 && currentIdx === list.length - 1 && !!playlist.hasNextPage;
 
   // Container detection + player setup
   useEffect(() => {
@@ -353,7 +361,22 @@ export function Player() {
         <div className="min-w-0 space-y-5">
           {/* video stage — media keeps its own near-black backdrop inside the
               card frame; the chrome around it stays on the neutral canvas. */}
-          <div className="card overflow-hidden">
+          <div ref={playerRef} className="card overflow-hidden">
+            {endedAtPageEnd && (
+              <div className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-4 py-2 text-theme-xs text-gray-600 dark:border-gray-800 dark:text-gray-300">
+                已播完当前已加载的列表。
+                <button
+                  onClick={async () => {
+                    setEndedAtPageEnd(false);
+                    await playlist.fetchNextPage();
+                  }}
+                  disabled={playlist.isFetchingNextPage}
+                  className="btn btn-outline btn-sm"
+                >
+                  加载下一页继续播放
+                </button>
+              </div>
+            )}
             <div className="relative flex min-h-[40vh] items-center justify-center bg-gray-950">
               {showLoading && <LoadingState />}
               {showNotFound && (
@@ -369,6 +392,7 @@ export function Player() {
                     className="max-h-[78vh] max-w-full outline-none"
                     onEnded={() => {
                       if (next) goToVideo(next.id);
+                      else if (atLoadedEnd) setEndedAtPageEnd(true);
                     }}
                     onError={async (e) => {
                       const code = (e.currentTarget.error?.code ?? 0);
@@ -541,21 +565,24 @@ export function Player() {
                 );
               })}
 
-              <div
-                ref={sentinelRef}
-                className="flex items-center justify-center gap-2 py-3 text-theme-xs text-gray-400 dark:text-gray-500"
-              >
-                {playlist.isFetchingNextPage ? (
-                  <>
-                    <Spinner className="size-3.5" />
-                    加载更多…
-                  </>
-                ) : playlist.hasNextPage ? (
+              <div className="flex flex-col items-center justify-center gap-2 px-3 py-3 text-theme-xs text-gray-400 dark:text-gray-500">
+                {currentIdx < 0 && playlist.hasNextPage && (
+                  <span>当前视频在后面的页里,加载下一页后会高亮显示</span>
+                )}
+                {playlist.hasNextPage ? (
                   <button
                     onClick={() => playlist.fetchNextPage()}
-                    className="hover:text-gray-600 dark:hover:text-gray-300"
+                    disabled={playlist.isFetchingNextPage}
+                    className="btn btn-outline btn-sm"
                   >
-                    加载更多
+                    {playlist.isFetchingNextPage ? (
+                      <>
+                        <Spinner className="size-3.5" />
+                        加载中…
+                      </>
+                    ) : (
+                      `加载下一页 (+${PLAYLIST_PAGE_SIZE})`
+                    )}
                   </button>
                 ) : list.length > 0 ? (
                   "— 已加载全部 —"

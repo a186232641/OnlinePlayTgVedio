@@ -15,9 +15,9 @@ interface PhotoResp {
 // unlike a video, there is nothing to navigate to — so browsing stays in place
 // and ←/→ (or a swipe) walk the same list the grid is showing.
 //
-// Like the video player's playlist, it does not stop at the end of what the
-// grid happens to have loaded: stepping past the last loaded image asks the
-// list for its next page and continues once it arrives.
+// It never pages on its own. At the last loaded image it offers a "加载下一页"
+// button; clicking it fetches one page and moves on to the first new image, if
+// that page brought any.
 export function Lightbox({
   items,
   index,
@@ -38,13 +38,10 @@ export function Lightbox({
   const item = items[index];
   const qc = useQueryClient();
   const [loaded, setLoaded] = useState(false);
-  // Set when the user asked for "next" at the end of the loaded images; cleared
-  // once the next image exists or the list is exhausted.
-  const [pendingNext, setPendingNext] = useState(false);
-  // A page can contain only videos, adding no image; keep fetching for the
-  // user's "next" but give up after this many empty pages in a row.
-  const emptyPages = useRef(0);
-  const lastLen = useRef(items.length);
+  // Set after the user clicks "加载下一页"; when that page lands we step to the
+  // first image it added (if any). Nothing here fetches without a click.
+  const [awaitingPage, setAwaitingPage] = useState(false);
+  const lenBeforeLoad = useRef(items.length);
 
   // Favorite state comes from the photo detail endpoint (same shape as the
   // player's), so the star reflects reality after a reload.
@@ -72,50 +69,24 @@ export function Lightbox({
 
   const go = (delta: number) => {
     const next = index + delta;
-    if (next < 0) return;
-    if (next < items.length) {
-      onIndex(next);
-      return;
-    }
-    if (delta > 0 && canLoadMore) {
-      // Only flag it; the effect below does the fetching, so a click can't race
-      // it into requesting the same page twice.
-      emptyPages.current = 0;
-      setPendingNext(true);
-    }
+    if (next >= 0 && next < items.length) onIndex(next);
   };
 
-  // A page arrived: either it brought the image the user is waiting for, or it
-  // brought none (all videos) and we fetch again — bounded.
-  useEffect(() => {
-    const grew = items.length > lastLen.current;
-    lastLen.current = items.length;
-    if (!pendingNext || loadingMore) return;
-    if (index + 1 < items.length) {
-      setPendingNext(false);
-      onIndex(index + 1);
-      return;
-    }
-    if (!grew) emptyPages.current += 1;
-    if (canLoadMore && emptyPages.current < 10) {
-      onLoadMore?.();
-    } else {
-      setPendingNext(false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items.length, loadingMore, pendingNext]);
+  const loadNextPage = () => {
+    if (!onLoadMore || loadingMore) return;
+    lenBeforeLoad.current = items.length;
+    setAwaitingPage(true);
+    onLoadMore();
+  };
 
-  // Prefetch the next page when the viewer gets close to the end, so stepping
-  // forward rarely has to wait — the same trick the video playlist uses. Once
-  // per list length, so an image-less page doesn't trigger a fetch cascade.
-  const prefetchedAt = useRef(-1);
+  // The page the user asked for has landed: move to its first image. A page
+  // holding only videos adds none — then stay put and let them click again.
   useEffect(() => {
-    if (!canLoadMore || loadingMore) return;
-    if (index >= items.length - 3 && prefetchedAt.current !== items.length) {
-      prefetchedAt.current = items.length;
-      onLoadMore?.();
-    }
-  }, [index, items.length, canLoadMore, loadingMore, onLoadMore]);
+    if (!awaitingPage || loadingMore) return;
+    setAwaitingPage(false);
+    if (items.length > lenBeforeLoad.current) onIndex(lenBeforeLoad.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [awaitingPage, loadingMore, items.length]);
 
   // Warm the browser cache for both neighbours so a step is instant.
   useEffect(() => {
@@ -163,7 +134,8 @@ export function Lightbox({
   if (!item) return null;
 
   const prevDisabled = index <= 0;
-  const nextDisabled = (atEnd && !canLoadMore) || pendingNext;
+  const nextDisabled = atEnd;
+  const showLoadMore = atEnd && canLoadMore;
   const navBtn =
     "flex size-11 items-center justify-center rounded-full bg-white/10 text-white backdrop-blur-sm transition-colors hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-25";
 
@@ -188,7 +160,6 @@ export function Lightbox({
               {index + 1} / {items.length}
               {hasMore ? "+" : ""}
             </span>
-            {pendingNext && <span>加载下一页…</span>}
             {item.width > 0 && (
               <span>
                 {item.width}×{item.height}
@@ -198,6 +169,17 @@ export function Lightbox({
             {item.date && <span className="tabular-nums">{item.date.slice(0, 10)}</span>}
           </div>
         </div>
+        {showLoadMore && (
+          <button
+            type="button"
+            onClick={loadNextPage}
+            disabled={loadingMore}
+            className="hidden items-center gap-1.5 rounded-full bg-white/10 px-3 py-2 text-theme-xs text-white transition-colors hover:bg-white/20 disabled:opacity-50 sm:inline-flex"
+          >
+            {loadingMore && <Spinner className="size-4 border-white/30 border-t-white" />}
+            加载下一页
+          </button>
+        )}
         <button
           type="button"
           onClick={() => fav.mutate()}
@@ -277,9 +259,21 @@ export function Lightbox({
         <button type="button" className={navBtn} disabled={prevDisabled} onClick={() => go(-1)}>
           <ChevronLeftIcon className="size-6" />
         </button>
-        <span className="text-theme-xs text-white/55">左右滑动切换</span>
+        {showLoadMore ? (
+          <button
+            type="button"
+            onClick={loadNextPage}
+            disabled={loadingMore}
+            className="inline-flex items-center gap-1.5 rounded-full bg-white/10 px-4 py-2 text-theme-xs text-white disabled:opacity-50"
+          >
+            {loadingMore && <Spinner className="size-4 border-white/30 border-t-white" />}
+            加载下一页
+          </button>
+        ) : (
+          <span className="text-theme-xs text-white/55">左右滑动切换</span>
+        )}
         <button type="button" className={navBtn} disabled={nextDisabled} onClick={() => go(1)}>
-          {pendingNext ? <Spinner className="size-5 border-white/30 border-t-white" /> : <ChevronRightIcon className="size-6" />}
+          <ChevronRightIcon className="size-6" />
         </button>
       </div>
 

@@ -255,10 +255,19 @@ a phone — re-fetching the whole list every 2s re-rendered every row, and a sta
 cost a request per row on page load. States are in memory keyed by channel id, so the handler
 scopes the ids to the user (`OwnedChannelIDs`) before reading any.
 
-The image viewer (`Lightbox`) gets the list's paging from `MediaBrowser` and **keeps going past the
-loaded page** like the video playlist: stepping past the last loaded image fetches the next page
-and continues (bounded retries across pages that hold only videos), it prefetches when within 3 of
-the end, preloads both neighbours, and supports horizontal swipe on touch screens.
+**Nothing pages on its own — the user asked for explicit buttons.** The image viewer (`Lightbox`)
+gets the list's paging from `MediaBrowser`, but at the last loaded image it shows a "加载下一页"
+button; one click fetches one page and steps to the first image it added (a videos-only page adds
+none, so it stays put). The player's playlist likewise has no scroll/near-end prefetch: its bottom
+button is the only way to load more, and autoplay stops at the last loaded video with a prompt.
+Don't reintroduce IntersectionObserver or prefetch loading. The viewer still preloads both
+neighbour images and supports horizontal swipe.
+
+**Player positioning.** Nothing in the app resets scroll on navigation, so `Player` scrolls the
+window to the player on each video change *if it's out of view* (a tile far down a grid, or the
+playlist that sits below the player on a phone). The playlist's "center the current row" effect
+re-runs until it has actually found the row for this video — on open the playlist is usually still
+loading, and running once per id change used to give up before the row existed.
 
 `channels.video_count` / `photo_count` are what the list endpoints report as totals, not a live
 `COUNT(*)`: on a million-row channel counting twice per first page costs hundreds of milliseconds
