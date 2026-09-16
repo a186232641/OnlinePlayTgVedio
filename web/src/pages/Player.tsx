@@ -125,9 +125,23 @@ function flipOrder(order: string | null): string | null {
       return "name_desc";
     case "name_desc":
       return "name_asc";
+    case "fav_desc":
+      return "fav_asc";
+    case "fav_asc":
+      return "fav_desc";
     default:
       return null;
   }
+}
+
+// sortKeyOf is the value an item sorts on under `order`, "" meaning empty/NULL.
+// Favorite time is never NULL server-side, but the anchor row comes from the
+// single-video endpoint, which doesn't carry it — hence the non-empty stand-in.
+function sortKeyOf(order: string | null, m: MediaItem): string {
+  const o = order ?? "";
+  if (o.startsWith("fav")) return m.favorited_at ?? "favorited";
+  if (o.startsWith("name")) return m.file_name ?? "";
+  return m.date ?? "";
 }
 
 // PlaylistPage is one fetched slice of the playlist window.
@@ -263,7 +277,10 @@ export function Player() {
   // the next item keeps the same list); it only re-anchors when the current
   // video isn't in the loaded window at all.
   const baseURL = playlistRequest(searchParams);
-  const order = searchParams.get("order");
+  // A favorites playlist with no explicit order uses the backend's favorites
+  // default (favorite time, newest first) — mirror that, or the reverse order
+  // for "加载上一页" would be computed from the wrong sort.
+  const order = searchParams.get("order") ?? (searchParams.get("fav") ? "fav_desc" : null);
   const reverseOrder = flipOrder(order);
   const [anchor, setAnchor] = useState(() => Number(id));
   const playlist = useInfiniteQuery<PlaylistPage>({
@@ -282,8 +299,7 @@ export function Player() {
         // NULLS LAST holds in both directions, so the reverse query also
         // returns the empty-key tail — rows that really sort at the very END of
         // the list. Drop them when the boundary row has a key.
-        const keyOf = (m: MediaItem) =>
-          (order ?? "").startsWith("name") ? m.file_name ?? "" : m.date ?? "";
+        const keyOf = (m: MediaItem) => sortKeyOf(order, m);
         const rows = resp.items.filter((m) => keyOf(m) !== "");
         return { items: rows.reverse(), hasMore: true, continueFrom: pp.id, hasPrev: resp.has_more };
       }
@@ -322,7 +338,7 @@ export function Player() {
     getPreviousPageParam: (first) => {
       const head = first.items[0];
       if (!first.hasPrev || !head || !reverseOrder) return undefined;
-      const key = (order ?? "").startsWith("name") ? head.file_name ?? "" : head.date ?? "";
+      const key = sortKeyOf(order, head);
       // The reverse-order trick is only exact for a boundary row that HAS a sort
       // key. For an empty one (a video with no file name under a name sort) the
       // server's keyset returns only other empty-key rows, silently skipping

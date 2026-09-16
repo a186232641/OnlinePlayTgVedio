@@ -70,6 +70,7 @@ export function MediaBrowser({
   hasMore,
   loadingMore,
   onLoadMore,
+  groupBy,
 }: {
   items: MediaItem[];
   isLoading?: boolean;
@@ -80,23 +81,62 @@ export function MediaBrowser({
   hasMore?: boolean;
   loadingMore?: boolean;
   onLoadMore?: () => void;
+  // Optional day grouping: returns the section label for an item (null = no
+  // label). Consecutive items with the same label share one section, so the
+  // caller's sort order must already put each day's items together.
+  groupBy?: (m: MediaItem) => string | null;
 }) {
   const photos = useMemo(() => items.filter((i) => i.kind === "photo"), [items]);
   const [openIdx, setOpenIdx] = useState<number | null>(null);
 
+  const sections = useMemo(() => {
+    if (!groupBy) return null;
+    const out: { label: string | null; items: MediaItem[] }[] = [];
+    for (const m of items) {
+      const label = groupBy(m);
+      const last = out[out.length - 1];
+      if (last && last.label === label) last.items.push(m);
+      else out.push({ label, items: [m] });
+    }
+    return out;
+  }, [items, groupBy]);
+
   if (isLoading) return <LoadingState />;
+
+  // Sections are separate grids, but the viewer still walks every photo of the
+  // whole list — the index is looked up across all of them.
+  const openPhoto = (m: MediaItem) => {
+    const i = photos.findIndex((p) => p.id === m.id);
+    if (i >= 0) setOpenIdx(i);
+  };
+
   return (
     <>
-      <MediaGrid
-        items={items}
-        linkTo={linkTo}
-        sources={sources}
-        emptyLabel={emptyLabel}
-        onOpenPhoto={(m) => {
-          const i = photos.findIndex((p) => p.id === m.id);
-          if (i >= 0) setOpenIdx(i);
-        }}
-      />
+      {sections && items.length > 0 ? (
+        <div className="space-y-6">
+          {sections.map((sec, i) => (
+            <section key={`${sec.label ?? "none"}-${i}`} className="space-y-3">
+              {sec.label && (
+                <h2 className="flex items-baseline gap-2 text-theme-sm font-semibold text-gray-800 dark:text-white/90">
+                  {sec.label}
+                  <span className="text-theme-xs font-normal text-gray-400 dark:text-gray-500">
+                    {sec.items.length} 项
+                  </span>
+                </h2>
+              )}
+              <MediaGrid items={sec.items} linkTo={linkTo} sources={sources} onOpenPhoto={openPhoto} />
+            </section>
+          ))}
+        </div>
+      ) : (
+        <MediaGrid
+          items={items}
+          linkTo={linkTo}
+          sources={sources}
+          emptyLabel={emptyLabel}
+          onOpenPhoto={openPhoto}
+        />
+      )}
       {openIdx !== null && (
         <Lightbox
           items={photos}

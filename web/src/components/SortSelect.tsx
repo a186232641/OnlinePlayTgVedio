@@ -9,26 +9,43 @@ export const SORT_OPTIONS = [
   { value: "name_desc", label: "文件名 Z→A" },
 ] as const;
 
-export type SortValue = (typeof SORT_OPTIONS)[number]["value"];
+// Favorites can additionally sort by when each item was favorited — and do by
+// default. The backend only honours these on a favorites listing.
+export const FAV_SORT_OPTIONS = [
+  { value: "fav_desc", label: "收藏时间 ↓ (最近收藏优先)" },
+  { value: "fav_asc", label: "收藏时间 ↑ (最早收藏优先)" },
+  ...SORT_OPTIONS,
+] as const;
+
+export type SortValue = (typeof FAV_SORT_OPTIONS)[number]["value"];
 
 export const DEFAULT_SORT: SortValue = "date_desc";
+export const FAV_DEFAULT_SORT: SortValue = "fav_desc";
 
-// normalizeSort coerces an arbitrary string (e.g. from the URL) to a known sort
-// value, falling back to the default. Keeps "" → date_desc so an absent param
-// behaves like the backend default.
-export function normalizeSort(s: string | null | undefined): SortValue {
-  if (!s) return DEFAULT_SORT;
-  return SORT_OPTIONS.some((o) => o.value === s) ? (s as SortValue) : DEFAULT_SORT;
+type SortOption = { value: SortValue; label: string };
+
+// normalizeSort coerces an arbitrary string (e.g. from the URL) to a sort value
+// valid for the given option set, falling back to that page's default. An
+// absent param maps to the default so it behaves like the backend default.
+export function normalizeSort(
+  s: string | null | undefined,
+  options: readonly SortOption[] = SORT_OPTIONS,
+  fallback: SortValue = DEFAULT_SORT,
+): SortValue {
+  if (!s) return fallback;
+  return options.some((o) => o.value === s) ? (s as SortValue) : fallback;
 }
 
 export function SortSelect({
   value,
   onChange,
   className,
+  options = SORT_OPTIONS,
 }: {
   value: SortValue;
   onChange: (v: SortValue) => void;
   className?: string;
+  options?: readonly SortOption[];
 }) {
   return (
     <select
@@ -37,7 +54,7 @@ export function SortSelect({
       onChange={(e) => onChange(e.target.value as SortValue)}
       title="排序方式"
     >
-      {SORT_OPTIONS.map((o) => (
+      {options.map((o) => (
         <option key={o.value} value={o.value}>
           {o.label}
         </option>

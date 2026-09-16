@@ -108,6 +108,7 @@ export interface MediaItem {
   width: number;
   height: number;
   text: string;
+  favorited_at?: string; // favorites listings only
   url: string;       // stream URL (video) / full image URL (photo)
   thumb_url: string;
 }

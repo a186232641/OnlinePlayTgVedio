@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -31,6 +32,8 @@ type mediaDTO struct {
 	Width           int    `json:"width"`
 	Height          int    `json:"height"`
 	Text            string `json:"text"`
+	// FavoritedAt is set only in favorites listings.
+	FavoritedAt string `json:"favorited_at,omitempty"`
 	// URL plays the video / loads the full image; ThumbURL is the grid tile.
 	URL      string `json:"url"`
 	ThumbURL string `json:"thumb_url"`
@@ -86,10 +89,17 @@ func photoToMediaDTO(p db.Photo) mediaDTO {
 }
 
 func mediaToDTO(m db.MediaItem) mediaDTO {
+	var d mediaDTO
+	var fav *time.Time
 	if m.Kind == db.MediaKindPhoto {
-		return photoToMediaDTO(*m.Photo)
+		d, fav = photoToMediaDTO(*m.Photo), m.Photo.FavoritedAt
+	} else {
+		d, fav = videoToMediaDTO(*m.Video), m.Video.FavoritedAt
 	}
-	return videoToMediaDTO(*m.Video)
+	if fav != nil {
+		d.FavoritedAt = fav.Format(time.RFC3339)
+	}
+	return d
 }
 
 // mediaCursorFromQuery reads the two-part keyset cursor. Videos and photos are

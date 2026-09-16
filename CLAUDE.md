@@ -291,6 +291,19 @@ TanStack details matter: a refetch replays page 0 from its stored param and deri
 page from `getNextPageParam`, so upward-loaded pages carry `continueFrom` (else a refetch stops at
 them and drops the opened video); and focus/reconnect refetch is off for this query.
 
+**Favorites sort by favorite time by default** (`fav_desc` / `fav_asc`). They key on the join's
+`f.created_at` (`favorites` / `photo_favorites`), which is NOT NULL, so the cursor is a plain row
+comparison `(f.created_at, id) < ((SELECT created_at … WHERE user_id=$1 AND <fk>=$p), $p)`
+(`favKeyset`) instead of the NULL-tail `CASE` of `keysetCursorOn`. `normalizeFavOrder` makes an
+empty order on a favorites listing mean `fav_desc` and ignores a fav order anywhere else (no `f`
+join exists there). Favorites queries also select `f.created_at` into `FavoritedAt` — `scanVideo`
+/ `scanPhoto` take trailing `extra` destinations for this — which the API exposes as
+`favorited_at` and `sortMedia` merges on. The favorites page groups sections by day of the active
+sort (favorite time, or publish date for a date sort; none for name sorts) via
+`MediaBrowser`'s `groupBy`; its date *filters* still match publish date. Favorites always pass an
+explicit `order` into the player, and the player assumes `fav_desc` for a `fav` playlist with
+none, so the reversed order for "加载上一页" is never computed from the wrong sort.
+
 `channels.video_count` / `photo_count` are what the list endpoints report as totals, not a live
 `COUNT(*)`: on a million-row channel counting twice per first page costs hundreds of milliseconds
 to render a number that only changes when a sync finishes. `MarkChannelIndexed` recomputes them

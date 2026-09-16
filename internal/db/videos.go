@@ -57,6 +57,10 @@ type Video struct {
 	// CACHE_DIR (empty = not fetched yet).
 	ThumbSize string
 	ThumbPath string
+
+	// FavoritedAt is when the listing user favorited this row. Not a videos
+	// column: it is filled only by favorites queries (FavOnly), from the join.
+	FavoritedAt *time.Time
 }
 
 // All columns prefixed with v. so SELECT works even when the FROM clause
@@ -78,9 +82,11 @@ const videoCols = `
     COALESCE(v.thumb_size, ''), COALESCE(v.thumb_path, '')
 `
 
-func scanVideo(row pgx.Row) (*Video, error) {
+// scanVideo reads videoCols; extra lets a query that selects columns after
+// them (the favorites join's created_at) scan those too.
+func scanVideo(row pgx.Row, extra ...any) (*Video, error) {
 	v := &Video{}
-	if err := row.Scan(
+	dest := []any{
 		&v.ID, &v.UserID, &v.ChannelID,
 		&v.TGMsgID, &v.MsgType,
 		&v.Date, &v.Edited,
@@ -93,7 +99,8 @@ func scanVideo(row pgx.Row) (*Video, error) {
 		&v.TGDocID, &v.AccessHash, &v.FileReference,
 		&v.GroupedID, &v.DCID,
 		&v.ThumbSize, &v.ThumbPath,
-	); err != nil {
+	}
+	if err := row.Scan(append(dest, extra...)...); err != nil {
 		return nil, err
 	}
 	return v, nil
@@ -327,6 +334,51 @@ func orderClause(orderBy string) string { return orderClauseOn("v", orderBy, tru
 // orderClauseOn is orderClause for an arbitrary alias/table. hasDuration=false
 // (photos) maps the duration key onto the default date ordering, since the
 // table has no duration column.
+// Favorite-time ordering. Only meaningful for a favorites listing, which joins
+// the favorites table as alias f; the list code falls back to the default order
+// for anything else (normalizeFavOrder).
+const (
+	OrderFavDesc = "fav_desc"
+	OrderFavAsc  = "fav_asc"
+)
+
+func isFavOrder(orderBy string) bool { return orderBy == OrderFavDesc || orderBy == OrderFavAsc }
+
+// normalizeFavOrder picks the effective order for a list. A favorites listing
+// with no explicit order sorts by when things were favorited, newest first —
+// that's what "my favorites" means; a non-favorites listing can't use a
+// favorite order at all (there is no f join), so it gets the default.
+func normalizeFavOrder(orderBy string, favOnly bool) string {
+	if favOnly && orderBy == "" {
+		return OrderFavDesc
+	}
+	if !favOnly && isFavOrder(orderBy) {
+		return ""
+	}
+	return orderBy
+}
+
+// favKeyset is the cursor for favorite-time ordering. favorites.created_at is
+// NOT NULL, so unlike keysetCursorOn there is no NULL tail to handle and a row
+// comparison is exact. The boundary's favorite time is looked up by id, scoped
+// to the listing user ($1 in every list query).
+func favKeyset(favTable, favIDCol, alias, orderBy, p string) string {
+	cmp := "<"
+	if orderBy == OrderFavAsc {
+		cmp = ">"
+	}
+	return "(f.created_at, " + alias + ".id) " + cmp +
+		" ((SELECT created_at FROM " + favTable + " WHERE user_id = $1 AND " + favIDCol + " = $" + p + "), $" + p + ")"
+}
+
+func favOrderClause(alias, orderBy string) string {
+	dir := "DESC"
+	if orderBy == OrderFavAsc {
+		dir = "ASC"
+	}
+	return " ORDER BY f.created_at " + dir + ", " + alias + ".id " + dir
+}
+
 func orderClauseOn(alias, orderBy string, hasDuration bool) string {
 	col, asc := orderColumn(orderBy)
 	if col == "" {
@@ -468,6 +520,7 @@ func (d *DB) SearchVideos(ctx context.Context, opt SearchVideosOpts) ([]Video, e
 	if opt.Limit <= 0 || opt.Limit > 500 {
 		opt.Limit = 200
 	}
+	opt.OrderBy = normalizeFavOrder(opt.OrderBy, opt.FavOnly)
 	args := []any{opt.UserID}
 	where := []string{"v.user_id=$1"}
 	if opt.Q != "" {
@@ -505,15 +558,27 @@ func (d *DB) SearchVideos(ctx context.Context, opt SearchVideosOpts) ([]Video, e
 	}
 	if opt.OffsetID > 0 {
 		args = append(args, opt.OffsetID)
-		where = append(where, keysetCursor(opt.OrderBy, itoa(len(args))))
+		if isFavOrder(opt.OrderBy) {
+			where = append(where, favKeyset("favorites", "video_id", "v", opt.OrderBy, itoa(len(args))))
+		} else {
+			where = append(where, keysetCursor(opt.OrderBy, itoa(len(args))))
+		}
 	}
 	args = append(args, opt.Limit)
+	cols := videoCols
 	from := `FROM videos v `
+	order := orderClause(opt.OrderBy)
 	if opt.FavOnly {
+		// Also return when each row was favorited: the favorites page groups by
+		// it, and the merged video+photo list sorts on it.
+		cols += `, f.created_at`
 		from += `JOIN favorites f ON f.video_id=v.id AND f.user_id=v.user_id `
+		if isFavOrder(opt.OrderBy) {
+			order = favOrderClause("v", opt.OrderBy)
+		}
 	}
-	q := `SELECT ` + videoCols + ` ` + from + `WHERE ` + joinWhere(where) +
-		orderClause(opt.OrderBy) + ` LIMIT $` + itoa(len(args))
+	q := `SELECT ` + cols + ` ` + from + `WHERE ` + joinWhere(where) +
+		order + ` LIMIT $` + itoa(len(args))
 	rows, err := d.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -521,9 +586,17 @@ func (d *DB) SearchVideos(ctx context.Context, opt SearchVideosOpts) ([]Video, e
 	defer rows.Close()
 	var out []Video
 	for rows.Next() {
-		v, err := scanVideo(rows)
+		var favAt time.Time
+		var extra []any
+		if opt.FavOnly {
+			extra = []any{&favAt}
+		}
+		v, err := scanVideo(rows, extra...)
 		if err != nil {
 			return nil, err
+		}
+		if opt.FavOnly {
+			v.FavoritedAt = &favAt
 		}
 		out = append(out, *v)
 	}

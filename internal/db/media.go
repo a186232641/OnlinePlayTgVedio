@@ -45,6 +45,13 @@ func (m MediaItem) date() *time.Time {
 	return m.Photo.Date
 }
 
+func (m MediaItem) favoritedAt() *time.Time {
+	if m.Video != nil {
+		return m.Video.FavoritedAt
+	}
+	return m.Photo.FavoritedAt
+}
+
 func (m MediaItem) fileName() string {
 	if m.Video != nil {
 		return m.Video.FileName
@@ -111,6 +118,9 @@ func (d *DB) ListMedia(ctx context.Context, opt ListMediaOpts) ([]MediaItem, Med
 	if opt.StreamerFilter {
 		opt.Kind = MediaKindVideo
 	}
+	// Resolve the effective order once here, so the merge below sorts on the
+	// same key the two branch queries did.
+	opt.OrderBy = normalizeFavOrder(opt.OrderBy, opt.FavOnly)
 
 	next := opt.Cursor
 	items := make([]MediaItem, 0, limit*2)
@@ -193,9 +203,14 @@ func sortMedia(items []MediaItem, orderBy string) {
 	if col == "" {
 		col, asc = "date", false
 	}
+	if isFavOrder(orderBy) {
+		col, asc = "favorited_at", orderBy == OrderFavAsc
+	}
 	less := func(a, b MediaItem) bool {
 		var cmp int
-		if col == "file_name" {
+		if col == "favorited_at" {
+			cmp = compareNullableTime(a.favoritedAt(), b.favoritedAt(), asc)
+		} else if col == "file_name" {
 			cmp = compareNullableString(a.fileName(), b.fileName(), asc)
 		} else {
 			cmp = compareNullableTime(a.date(), b.date(), asc)

@@ -45,6 +45,9 @@ type Photo struct {
 	ThumbSize string
 	// ThumbPath is the already-downloaded thumbnail, relative to CACHE_DIR.
 	ThumbPath string
+
+	// FavoritedAt: see Video.FavoritedAt (favorites listings only).
+	FavoritedAt *time.Time
 }
 
 // Columns are aliased p.* so the SELECT survives a JOIN with photo_favorites
@@ -62,9 +65,9 @@ const photoCols = `
     COALESCE(p.thumb_path, '')
 `
 
-func scanPhoto(row pgx.Row) (*Photo, error) {
+func scanPhoto(row pgx.Row, extra ...any) (*Photo, error) {
 	p := &Photo{}
-	if err := row.Scan(
+	dest := []any{
 		&p.ID, &p.UserID, &p.ChannelID,
 		&p.TGMsgID, &p.MsgType,
 		&p.Date, &p.Edited,
@@ -75,7 +78,8 @@ func scanPhoto(row pgx.Row) (*Photo, error) {
 		&p.TGPhotoID, &p.AccessHash, &p.FileReference,
 		&p.DCID, &p.SizeType, &p.ThumbSize,
 		&p.ThumbPath,
-	); err != nil {
+	}
+	if err := row.Scan(append(dest, extra...)...); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -294,6 +298,7 @@ func (d *DB) SearchPhotos(ctx context.Context, opt SearchPhotosOpts) ([]Photo, e
 	if opt.Limit <= 0 || opt.Limit > 500 {
 		opt.Limit = 200
 	}
+	opt.OrderBy = normalizeFavOrder(opt.OrderBy, opt.FavOnly)
 	args := []any{opt.UserID}
 	where := []string{"p.user_id=$1"}
 	if opt.Q != "" {
@@ -323,15 +328,25 @@ func (d *DB) SearchPhotos(ctx context.Context, opt SearchPhotosOpts) ([]Photo, e
 	}
 	if opt.OffsetID > 0 {
 		args = append(args, opt.OffsetID)
-		where = append(where, keysetCursorOn("photos", "p", opt.OrderBy, itoa(len(args)), false))
+		if isFavOrder(opt.OrderBy) {
+			where = append(where, favKeyset("photo_favorites", "photo_id", "p", opt.OrderBy, itoa(len(args))))
+		} else {
+			where = append(where, keysetCursorOn("photos", "p", opt.OrderBy, itoa(len(args)), false))
+		}
 	}
 	args = append(args, opt.Limit)
+	cols := photoCols
 	from := `FROM photos p `
+	order := orderClauseOn("p", opt.OrderBy, false)
 	if opt.FavOnly {
+		cols += `, f.created_at`
 		from += `JOIN photo_favorites f ON f.photo_id=p.id AND f.user_id=p.user_id `
+		if isFavOrder(opt.OrderBy) {
+			order = favOrderClause("p", opt.OrderBy)
+		}
 	}
-	q := `SELECT ` + photoCols + ` ` + from + `WHERE ` + joinWhere(where) +
-		orderClauseOn("p", opt.OrderBy, false) + ` LIMIT $` + itoa(len(args))
+	q := `SELECT ` + cols + ` ` + from + `WHERE ` + joinWhere(where) +
+		order + ` LIMIT $` + itoa(len(args))
 	rows, err := d.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -339,9 +354,17 @@ func (d *DB) SearchPhotos(ctx context.Context, opt SearchPhotosOpts) ([]Photo, e
 	defer rows.Close()
 	var out []Photo
 	for rows.Next() {
-		p, err := scanPhoto(rows)
+		var favAt time.Time
+		var extra []any
+		if opt.FavOnly {
+			extra = []any{&favAt}
+		}
+		p, err := scanPhoto(rows, extra...)
 		if err != nil {
 			return nil, err
+		}
+		if opt.FavOnly {
+			p.FavoritedAt = &favAt
 		}
 		out = append(out, *p)
 	}

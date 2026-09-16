@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"os"
+	"sort"
 	"testing"
 	"time"
 )
@@ -284,6 +285,115 @@ func TestIntegration(t *testing.T) {
 	items, _, _, err = d.ListMedia(ctx, ListMediaOpts{UserID: uid, FavOnly: true, Limit: 100})
 	if err != nil || len(items) != 2 {
 		t.Fatalf("favorites = %d rows, %v", len(items), err)
+	}
+
+	// --- favorites ordered by favorite time ---------------------------------
+	// Favorite every row in the topic with explicit, heavily tied timestamps
+	// that interleave videos and photos, then walk the merged list at several
+	// page sizes: every favorite exactly once, in (favorited_at, id) order.
+	if _, err := d.Exec(ctx, `DELETE FROM favorites WHERE user_id=$1`, uid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(ctx, `DELETE FROM photo_favorites WHERE user_id=$1`, uid); err != nil {
+		t.Fatal(err)
+	}
+	favBase := time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC)
+	type favRow struct {
+		kind string
+		id   int64
+		at   time.Time
+	}
+	var favs []favRow
+	vrows, _ := d.Query(ctx, `SELECT id FROM videos WHERE channel_id=$1 ORDER BY id`, topicID)
+	var vids []int64
+	for vrows.Next() {
+		var id int64
+		_ = vrows.Scan(&id)
+		vids = append(vids, id)
+	}
+	vrows.Close()
+	prows, _ := d.Query(ctx, `SELECT id FROM photos WHERE channel_id=$1 ORDER BY id`, topicID)
+	var phs []int64
+	for prows.Next() {
+		var id int64
+		_ = prows.Scan(&id)
+		phs = append(phs, id)
+	}
+	prows.Close()
+	for i, id := range vids {
+		at := favBase.Add(time.Duration(i%3) * time.Hour) // only 3 distinct times
+		if _, err := d.Exec(ctx, `INSERT INTO favorites (user_id, video_id, created_at) VALUES ($1,$2,$3)`, uid, id, at); err != nil {
+			t.Fatal(err)
+		}
+		favs = append(favs, favRow{MediaKindVideo, id, at})
+	}
+	for i, id := range phs {
+		at := favBase.Add(time.Duration(i%3) * time.Hour)
+		if _, err := d.Exec(ctx, `INSERT INTO photo_favorites (user_id, photo_id, created_at) VALUES ($1,$2,$3)`, uid, id, at); err != nil {
+			t.Fatal(err)
+		}
+		favs = append(favs, favRow{MediaKindPhoto, id, at})
+	}
+
+	for _, order := range []string{"", OrderFavDesc, OrderFavAsc} {
+		asc := order == OrderFavAsc
+		want := append([]favRow(nil), favs...)
+		sort.SliceStable(want, func(i, j int) bool {
+			a, b := want[i], want[j]
+			if !a.at.Equal(b.at) {
+				return a.at.Before(b.at) == asc
+			}
+			if a.id != b.id {
+				return (a.id < b.id) == asc
+			}
+			return a.kind < b.kind
+		})
+		for _, limit := range []int{1, 3, 7, 500} {
+			var got []favRow
+			cur := MediaCursor{}
+			for guard := 0; ; guard++ {
+				if guard > 200 {
+					t.Fatalf("order %q limit %d: pagination did not terminate", order, limit)
+				}
+				items, next, more, err := d.ListMedia(ctx, ListMediaOpts{
+					UserID: uid, FavOnly: true, OrderBy: order, Limit: limit, Cursor: cur,
+				})
+				if err != nil {
+					t.Fatalf("order %q: %v", order, err)
+				}
+				for _, it := range items {
+					at := it.favoritedAt()
+					if at == nil {
+						t.Fatalf("order %q: favorites row without favorited_at", order)
+					}
+					got = append(got, favRow{it.Kind, it.id(), *at})
+				}
+				if !more {
+					break
+				}
+				cur = next
+			}
+			if len(got) != len(want) {
+				t.Fatalf("order %q limit %d: got %d favorites, want %d", order, limit, len(got), len(want))
+			}
+			for i := range want {
+				if got[i].kind != want[i].kind || got[i].id != want[i].id {
+					t.Fatalf("order %q limit %d: position %d = %s#%d, want %s#%d",
+						order, limit, i, got[i].kind, got[i].id, want[i].kind, want[i].id)
+				}
+			}
+		}
+	}
+	// A favorite order outside a favorites listing is ignored, not an SQL error.
+	if _, _, _, err := d.ListMedia(ctx, ListMediaOpts{UserID: uid, ChannelID: topicID, OrderBy: OrderFavDesc, Limit: 5}); err != nil {
+		t.Fatal("fav order on a non-favorites list:", err)
+	}
+	// Leave the favorites state the rest of the test expects: vid + pid only.
+	if _, err := d.Exec(ctx, `DELETE FROM favorites WHERE user_id=$1 AND video_id<>$2`, uid, vid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(ctx, `DELETE FROM photo_favorites WHERE user_id=$1 AND photo_id<>$2`, uid, pid); err != nil {
+		t.Fatal(err)
 	}
 
 	// --- cache entries are keyed by (kind, id) ----------------------------
