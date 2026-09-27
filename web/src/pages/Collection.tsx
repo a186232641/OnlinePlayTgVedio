@@ -1,13 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { api, ApiError, Collection as CollectionT, MediaItem } from "../api/client";
 import { MEDIA_PAGE_SIZE, normalizeKind, useMediaPages } from "../api/media";
 import { KindTabs, MediaBrowser } from "../components/MediaBrowser";
 import { COLLECTION_SORT_OPTIONS, FAV_DEFAULT_SORT, SortSelect, normalizeSort } from "../components/SortSelect";
-import { PencilIcon, PlayIcon, TrashIcon } from "../components/icons";
-import { Slideshow } from "../components/Slideshow";
+import { PencilIcon, TrashIcon } from "../components/icons";
+import { SlideshowButton } from "../components/Slideshow";
 import { AlertStrip, BackBar, LoadingState, MoreFooter, PageHeader } from "../components/ui";
 import { groupFor } from "../dates";
 
@@ -38,8 +38,7 @@ export function Collection() {
     { path: `/api/collections/${id}/media` },
   );
   const groupBy = useMemo(() => groupFor(order), [order]);
-  // "播放": the whole list, images and videos, in the current kind/sort.
-  const [playing, setPlaying] = useState(false);
+
 
   const patch = (next: { kind?: string; order?: string }) => {
     const p = new URLSearchParams(searchParams);
@@ -96,16 +95,13 @@ export function Collection() {
         }
         actions={
           <>
-            <button
-              type="button"
-              className="btn btn-primary btn-sm"
-              disabled={items.length === 0}
-              onClick={() => setPlaying(true)}
-              title="全屏依次播放;可手动切换,或自动播放(图片停留 2.5 秒,视频播完再切)"
-            >
-              <PlayIcon className="size-4" />
-              播放
-            </button>
+            <SlideshowButton
+              items={items}
+              hasMore={!!q.hasNextPage}
+              loadingMore={q.isFetchingNextPage}
+              onLoadMore={q.fetchNextPage}
+              className="btn-sm"
+            />
             <button
               type="button"
               className="btn btn-outline btn-sm"
@@ -168,15 +164,6 @@ export function Collection() {
         pageSize={MEDIA_PAGE_SIZE}
       />
 
-      {playing && (
-        <Slideshow
-          items={items}
-          onClose={() => setPlaying(false)}
-          hasMore={!!q.hasNextPage}
-          loadingMore={q.isFetchingNextPage}
-          onLoadMore={q.fetchNextPage}
-        />
-      )}
     </div>
   );
 }

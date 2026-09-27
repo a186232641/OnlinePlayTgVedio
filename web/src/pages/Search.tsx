@@ -6,6 +6,7 @@ import { api, Channel, MediaKindFilter } from "../api/client";
 import { MEDIA_PAGE_SIZE, normalizeKind, useMediaPages } from "../api/media";
 import { LIST_PAGE_SIZE, useDebounced, usePagedList } from "../api/paged";
 import { KindTabs, MediaBrowser } from "../components/MediaBrowser";
+import { SlideshowButton } from "../components/Slideshow";
 import { SortSelect, SortValue, normalizeSort, DEFAULT_SORT } from "../components/SortSelect";
 import { ChevronRightIcon, GridIcon, SearchIcon, TopicsIcon } from "../components/icons";
 import { EmptyState, LoadingState, MoreFooter, PageHeader, cx } from "../components/ui";
@@ -320,6 +321,13 @@ function MediaSearch({
               value={submitted.order}
               onChange={changeOrder}
               className="field field-select field-sm ml-auto w-auto"
+            />
+            <SlideshowButton
+              items={all}
+              hasMore={!!result.hasNextPage}
+              loadingMore={result.isFetchingNextPage}
+              onLoadMore={result.fetchNextPage}
+              className="btn-sm"
             />
           </div>
 

@@ -65,6 +65,14 @@ export function Slideshow({
     setAwaitingPage(true);
     onLoadMore();
   };
+  // The list can shrink under us (un-favoriting from here on the favorites
+  // page refetches it): stay on a real item, or close if none is left —
+  // rendering nothing would leave the page scroll-locked with no way out.
+  useEffect(() => {
+    if (items.length === 0) onClose();
+    else if (index >= items.length) setIndex(items.length - 1);
+  }, [items.length, index]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Step onto the first item of the page the button fetched.
   useEffect(() => {
     if (!awaitingPage || loadingMore) return;
@@ -290,5 +298,46 @@ export function Slideshow({
         </button>
       </div>
     </div>
+  );
+}
+
+// SlideshowButton is the "播放" button of a media list: it opens a Slideshow
+// over the list as loaded (its current filter/sort), with the list's paging.
+export function SlideshowButton({
+  items,
+  hasMore,
+  loadingMore,
+  onLoadMore,
+  className,
+}: {
+  items: MediaItem[];
+  hasMore?: boolean;
+  loadingMore?: boolean;
+  onLoadMore?: () => void;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button
+        type="button"
+        className={cx("btn btn-primary", className)}
+        disabled={items.length === 0}
+        onClick={() => setOpen(true)}
+        title="全屏依次播放;可手动切换,或自动播放(图片停留 2.5 秒,视频播完再切)"
+      >
+        <PlayIcon className="size-4" />
+        播放
+      </button>
+      {open && (
+        <Slideshow
+          items={items}
+          onClose={() => setOpen(false)}
+          hasMore={hasMore}
+          loadingMore={loadingMore}
+          onLoadMore={onLoadMore}
+        />
+      )}
+    </>
   );
 }

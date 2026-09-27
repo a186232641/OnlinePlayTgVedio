@@ -9,6 +9,7 @@ import { KindTabs, MediaBrowser } from "../components/MediaBrowser";
 import { SortSelect, DEFAULT_SORT, normalizeSort } from "../components/SortSelect";
 import { ChevronLeftIcon, ChevronRightIcon, RefreshIcon, SearchIcon, TopicsIcon, TrashIcon } from "../components/icons";
 import { SelectToggle, SelectionBar, useMediaSelection } from "../components/SelectionBar";
+import { SlideshowButton } from "../components/Slideshow";
 import { AlertStrip, BackBar, EmptyState, LoadingState, MoreFooter, PageHeader, Toggle } from "../components/ui";
 
 interface ChannelResp { channel: Channel }
@@ -470,6 +471,12 @@ function MediaView({ id, channel }: { id: string; channel?: Channel }) {
           counts={{ videos: totalVideos, photos: totalPhotos }}
         />
         <SelectToggle sel={sel} />
+        <SlideshowButton
+          items={items}
+          hasMore={!!q.hasNextPage}
+          loadingMore={q.isFetchingNextPage}
+          onLoadMore={q.fetchNextPage}
+        />
       </form>
 
       <div className="text-theme-xs text-gray-500 dark:text-gray-400">
@@ -633,6 +640,13 @@ function StreamerVideos({ id, streamer, onBack }: { id: string; streamer: string
         <span className="text-theme-xs text-gray-500 dark:text-gray-400">已加载 {items.length}</span>
         <SortSelect value={order} onChange={setOrder} className="field field-select ml-auto w-auto" />
         <SelectToggle sel={sel} className="btn-sm" />
+        <SlideshowButton
+          items={items}
+          hasMore={!!q.hasNextPage}
+          loadingMore={q.isFetchingNextPage}
+          onLoadMore={q.fetchNextPage}
+          className="btn-sm"
+        />
       </div>
 
       <MediaBrowser

@@ -277,8 +277,8 @@ Don't reintroduce IntersectionObserver or prefetch loading. The viewer still pre
 neighbour images and supports horizontal swipe.
 
 **Playback setup lives in `src/playback.ts`** (`attachStream`): container sniffing and the
-mpegts.js-vs-native choice, shared by `Player` and `Slideshow`. The collection page's "播放" opens
-`Slideshow`: images and videos full screen in list order, manual ←/→/swipe, or auto mode
+mpegts.js-vs-native choice, shared by `Player` and `Slideshow`. Every media list (channel/topic, streamer, favorites, search,
+collection) has a "播放" `SlideshowButton` that opens `Slideshow` over the list as loaded: images and videos full screen in list order, manual ←/→/swipe, or auto mode
 (`IMAGE_DWELL_MS` = 2.5 s per image, a video advances on `ended`). Its timers are keyed on the
 current item, not re-armed per render (that would restart the dwell), and it passes
 `retryMuted` so a blocked autoplay plays muted instead of stalling auto mode. Like the viewer and

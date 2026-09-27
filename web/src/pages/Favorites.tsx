@@ -10,6 +10,7 @@ import { CollectionCards } from "../components/CollectionCards";
 import { Cover } from "../components/Cover";
 import { FolderIcon, GridIcon, TopicsIcon, UsersIcon } from "../components/icons";
 import { SelectToggle, SelectionBar, useMediaSelection } from "../components/SelectionBar";
+import { SlideshowButton } from "../components/Slideshow";
 import { dayLabel, groupFor } from "../dates";
 import { AlertStrip, BackBar, EmptyState, LoadingState, MoreFooter, PageHeader, cx } from "../components/ui";
 
@@ -285,6 +286,12 @@ export function Favorites() {
             className="field field-select ml-auto w-auto"
           />
           <SelectToggle sel={sel} />
+          <SlideshowButton
+            items={items}
+            hasMore={!!q.hasNextPage}
+            loadingMore={q.isFetchingNextPage}
+            onLoadMore={q.fetchNextPage}
+          />
         </div>
       </form>
 
