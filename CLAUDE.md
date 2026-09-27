@@ -278,6 +278,13 @@ playlist that sits below the player on a phone). The playlist's "center the curr
 re-runs until it has actually found the row for this video — on open the playlist is usually still
 loading, and running once per id change used to give up before the row existed.
 
+**Returning from the player restores the list's scroll** (`src/scroll.ts`, `useReturnScroll` in
+`Layout`). There is no router-level restoration (`BrowserRouter`, not a data router) and "返回" is a
+pushed `Link`, so leaving a page for `/videos/*` remembers (pathname, scrollY) and arriving back
+at that pathname re-applies it, retrying per frame until the cached pages have rendered. Keyed by
+pathname, not search — "返回" rebuilds the URL, so its params can differ. `gcTime` is raised to an
+hour in `main.tsx` so those pages are still cached after a long viewing session.
+
 **The playlist is windowed around the opened video**, not loaded from the top of the list. Its first
 page is that video followed by the rows after it (`offset_video=<id>`), so it is always row one —
 loading from the top left it absent whenever it sat past the first 500 rows, with nothing to scroll

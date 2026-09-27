@@ -19,6 +19,7 @@ import {
   SunIcon,
   UsersIcon,
 } from "./icons";
+import { useReturnScroll } from "../scroll";
 
 const SIDEBAR_KEY = "tgv-sidebar-collapsed";
 
@@ -39,6 +40,7 @@ export function Layout() {
   const qc = useQueryClient();
   const location = useLocation();
   const { theme, toggle } = useTheme();
+  useReturnScroll();
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(() => {
