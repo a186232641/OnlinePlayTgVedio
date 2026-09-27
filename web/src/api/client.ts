@@ -143,6 +143,17 @@ export interface MediaPage {
 
 export type MediaKindFilter = "" | "video" | "photo";
 
+// FavoriteSource is one card of the by-source favorites view: a channel or
+// topic the user has favorited media from, with the latest favorite as cover.
+export interface FavoriteSource {
+  source: MediaSource;
+  videos: number;
+  photos: number;
+  last_favorited_at: string;
+  cover_kind: "video" | "photo";
+  cover_thumb_url: string;
+}
+
 // SyncState mirrors indexer.SyncState. `phase` is "syncing" for a plain
 // channel/topic and "topics" / "话题 3/12: …" while a forum group fans out.
 export interface SyncState {

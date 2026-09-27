@@ -384,6 +384,36 @@ func TestIntegration(t *testing.T) {
 			}
 		}
 	}
+	// --- favorites grouped by source ---------------------------------------
+	// Every favorite above sits in the topic: one group, both kinds counted,
+	// the cover is a row carrying the latest favorite time.
+	groups, err := d.FavoriteSources(ctx, uid, "")
+	if err != nil {
+		t.Fatal("FavoriteSources:", err)
+	}
+	if len(groups) != 1 || groups[0].ChannelID != topicID ||
+		groups[0].Videos != int64(len(vids)) || groups[0].Photos != int64(len(phs)) {
+		t.Fatalf("FavoriteSources = %+v (want topic %d, %d videos, %d photos)", groups, topicID, len(vids), len(phs))
+	}
+	var coverAt time.Time
+	for _, f := range favs {
+		if f.kind == groups[0].CoverKind && f.id == groups[0].CoverID {
+			coverAt = f.at
+		}
+	}
+	if !coverAt.Equal(groups[0].LastFavoritedAt) {
+		t.Fatalf("cover %s#%d favorited at %v, group last at %v",
+			groups[0].CoverKind, groups[0].CoverID, coverAt, groups[0].LastFavoritedAt)
+	}
+	if vs, err := d.FavoriteSources(ctx, uid, MediaKindVideo); err != nil || len(vs) != 1 || vs[0].Photos != 0 || vs[0].CoverKind != MediaKindVideo {
+		t.Fatalf("FavoriteSources(video) = %+v, %v", vs, err)
+	}
+	// Opening a group is the favorites listing scoped to that channel row.
+	items, _, _, err = d.ListMedia(ctx, ListMediaOpts{UserID: uid, FavOnly: true, ChannelID: topicID, Limit: 500})
+	if err != nil || len(items) != len(favs) {
+		t.Fatalf("favorites in topic = %d rows, %v (want %d)", len(items), err, len(favs))
+	}
+
 	// A favorite order outside a favorites listing is ignored, not an SQL error.
 	if _, _, _, err := d.ListMedia(ctx, ListMediaOpts{UserID: uid, ChannelID: topicID, OrderBy: OrderFavDesc, Limit: 5}); err != nil {
 		t.Fatal("fav order on a non-favorites list:", err)

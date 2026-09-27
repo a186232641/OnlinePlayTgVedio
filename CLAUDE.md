@@ -304,6 +304,11 @@ sort (favorite time, or publish date for a date sort; none for name sorts) via
 explicit `order` into the player, and the player assumes `fav_desc` for a `fav` playlist with
 none, so the reversed order for "加载上一页" is never computed from the wrong sort.
 
+**Favorites by source** (`?view=sources`): `GET /favorites/sources` (`FavoriteSources`) groups
+both favorites tables by the item's channel row — for a forum that is the topic — with per-kind
+counts and the latest favorite as cover. Opening a card is the ordinary favorites listing with
+`?channel_id=`, which the player's `fav` playlist and "返回收藏" carry along.
+
 `channels.video_count` / `photo_count` are what the list endpoints report as totals, not a live
 `COUNT(*)`: on a million-row channel counting twice per first page costs hundreds of milliseconds
 to render a number that only changes when a sync finishes. `MarkChannelIndexed` recomputes them

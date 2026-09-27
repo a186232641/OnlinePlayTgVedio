@@ -49,6 +49,9 @@ function playlistRequest(p: URLSearchParams): string | null {
     if (fileName) qs.set("file_name", fileName);
     if (dateFrom) qs.set("date_from", dateFrom);
     if (dateTo) qs.set("date_to", dateTo);
+    // Opened from one source of the by-source favorites view.
+    const favCh = p.get("channel_id");
+    if (favCh) qs.set("channel_id", favCh);
     return `/api/favorites/?${qs}`;
   }
 
@@ -94,7 +97,7 @@ function backTarget(p: URLSearchParams): Back {
   };
 
   if (p.get("fav")) {
-    return { kind: "fav", to: `/favorites${pick(["file_name", "date_from", "date_to", "order", "kind"])}` };
+    return { kind: "fav", to: `/favorites${pick(["file_name", "date_from", "date_to", "order", "kind", "channel_id"])}` };
   }
   if (p.get("text") || p.get("file_name") || p.get("date_from") || p.get("date_to")) {
     return {
