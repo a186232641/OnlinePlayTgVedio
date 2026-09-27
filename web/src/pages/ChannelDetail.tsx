@@ -99,6 +99,9 @@ export function ChannelDetail() {
   );
 }
 
+// Last topic-list search per group id, for this session (see TopicList).
+const topicFilters = new Map<string, string>();
+
 // TopicList is what a forum group shows instead of a media list: its content
 // all lives one level down, in the topics.
 //
@@ -108,7 +111,13 @@ export function ChannelDetail() {
 // topics endpoint itself (one poll, not one per row).
 function TopicList({ id, channel }: { id: string; channel?: Channel }) {
   const qc = useQueryClient();
-  const [filter, setFilter] = useState("");
+  // Remembered per group for the session: coming back from a topic must show
+  // the same filtered list, or the restored scroll offset lands on other rows.
+  const [filter, setFilterState] = useState(() => topicFilters.get(id) ?? "");
+  const setFilter = (v: string) => {
+    topicFilters.set(id, v);
+    setFilterState(v);
+  };
   // A forum group that was synced before it was recognised as one has media on
   // its OWN row (getHistory on a forum returns every topic flattened), which
   // the topic view would otherwise hide forever.

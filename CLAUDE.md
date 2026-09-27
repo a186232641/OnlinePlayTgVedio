@@ -301,12 +301,18 @@ playlist that sits below the player on a phone). The playlist's "center the curr
 re-runs until it has actually found the row for this video — on open the playlist is usually still
 loading, and running once per id change used to give up before the row existed.
 
-**Returning from the player restores the list's scroll** (`src/scroll.ts`, `useReturnScroll` in
-`Layout`). There is no router-level restoration (`BrowserRouter`, not a data router) and "返回" is a
-pushed `Link`, so leaving a page for `/videos/*` remembers (pathname, scrollY) and arriving back
-at that pathname re-applies it, retrying per frame until the cached pages have rendered. Keyed by
-pathname, not search — "返回" rebuilds the URL, so its params can differ. `gcTime` is raised to an
-hour in `main.tsx` so those pages are still cached after a long viewing session.
+**"返回" restores the page's scroll** (`src/scroll.ts`, `useReturnScroll` in `Layout`). There is no
+router-level restoration (`BrowserRouter`, not a data router) and every "返回…" link is a pushed
+`Link`, so: each forward (PUSH) navigation records (pathname, scrollY) of the page left on a
+trail; a link carrying `RESTORE_SCROLL` state — every `BackBar` does — pops the newest trail entry
+for its target pathname and scrolls there, retrying per frame until the cached pages have
+rendered. That covers any drill-down, not just the player (topic list → topic → 返回话题列表, topic
+→ video → 返回). Browser back/forward (POP) restores the position saved for that history entry
+instead. Pathname, not search, is the match (back links rebuild their URL), and the trail is
+what keeps same-path drill-downs (`/favorites?group=…` → `?channel_id=…`) apart. The topic
+list's search box is remembered per group for the same reason — a different filter would put
+other rows at that offset. `gcTime` is an hour (`main.tsx`) so the pages are still cached.
+Verified with a headless browser against seeded data (the pre-fix code returned to 0).
 
 **The playlist is windowed around the opened video**, not loaded from the top of the list. Its first
 page is that video followed by the rows after it (`offset_video=<id>`), so it is always row one —

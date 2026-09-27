@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
+import { RESTORE_SCROLL } from "../scroll";
 import { ChevronLeftIcon } from "./icons";
 
 // Shared surfaces built from the design tokens in tailwind.config.js. Pages
@@ -14,6 +15,8 @@ export function cx(...parts: (string | false | null | undefined)[]) {
 // actions on the right, with an optional count/meta line underneath.
 // BackBar is a page's "返回…" link, pinned just under the app header (h-16) so
 // it stays reachable however far down a long list the user has scrolled. It
+// carries RESTORE_SCROLL, so the target page comes back at the position the
+// user left it (useReturnScroll). It
 // must be the page's first child: the negative margins cancel the page gutter
 // (p-4 / md:p-6) so it runs full-bleed on the canvas colour and content scrolls
 // underneath it.
@@ -22,6 +25,7 @@ export function BackBar({ to, children }: { to: string; children: ReactNode }) {
     <div data-backbar className="sticky top-16 z-10 -mx-4 -mt-4 border-b border-gray-200 bg-gray-50/95 px-4 py-2.5 backdrop-blur md:-mx-6 md:-mt-6 md:px-6 dark:border-gray-800 dark:bg-gray-900/95">
       <Link
         to={to}
+        state={RESTORE_SCROLL}
         className="inline-flex max-w-full items-center gap-1 text-theme-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
       >
         <ChevronLeftIcon className="size-4 shrink-0" />
