@@ -147,15 +147,28 @@ func collectionMemberTable(kind string) (table, fk string) {
 	return "collection_videos", "video_id"
 }
 
-// AddToCollection adds one media row. The caller has checked that both the
-// collection and the media row belong to the user. Adding twice is a no-op.
-func (d *DB) AddToCollection(ctx context.Context, collectionID int64, kind string, mediaID int64) error {
+// AddToCollection adds media rows of one kind in a single statement and
+// returns how many were new. The caller has checked the collection is the
+// user's; the media side is checked here — ids that aren't the user's rows
+// are skipped, not added. Adding an existing member is a no-op.
+func (d *DB) AddToCollection(ctx context.Context, userID, collectionID int64, kind string, mediaIDs []int64) (int64, error) {
+	if len(mediaIDs) == 0 {
+		return 0, nil
+	}
 	table, fk := collectionMemberTable(kind)
-	_, err := d.Exec(ctx, `
-        INSERT INTO `+table+` (collection_id, `+fk+`) VALUES ($1, $2)
+	media := "videos"
+	if kind == MediaKindPhoto {
+		media = "photos"
+	}
+	tag, err := d.Exec(ctx, `
+        INSERT INTO `+table+` (collection_id, `+fk+`)
+        SELECT $1, m.id FROM `+media+` m WHERE m.user_id = $2 AND m.id = ANY($3)
         ON CONFLICT DO NOTHING
-    `, collectionID, mediaID)
-	return err
+    `, collectionID, userID, mediaIDs)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
 }
 
 // RemoveFromCollection removes one media row; the collection must be the

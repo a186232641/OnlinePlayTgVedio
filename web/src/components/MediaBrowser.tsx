@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 
 import { MediaItem, MediaKindFilter, MediaSource } from "../api/client";
 import { Lightbox } from "./Lightbox";
-import { MediaGrid } from "./MediaGrid";
+import { MediaGrid, Selection, mediaKey } from "./MediaGrid";
 import { FilmIcon, GridIcon, ImageIcon } from "./icons";
 import { LoadingState, cx } from "./ui";
 
@@ -71,6 +71,8 @@ export function MediaBrowser({
   loadingMore,
   onLoadMore,
   groupBy,
+  selection,
+  onSelectMany,
 }: {
   items: MediaItem[];
   isLoading?: boolean;
@@ -85,6 +87,10 @@ export function MediaBrowser({
   // label). Consecutive items with the same label share one section, so the
   // caller's sort order must already put each day's items together.
   groupBy?: (m: MediaItem) => string | null;
+  // Multi-select mode: tiles toggle instead of opening. onSelectMany backs the
+  // per-section "全选本组" / "取消本组".
+  selection?: Selection;
+  onSelectMany?: (items: MediaItem[], on: boolean) => void;
 }) {
   const photos = useMemo(() => items.filter((i) => i.kind === "photo"), [items]);
   const [openIdx, setOpenIdx] = useState<number | null>(null);
@@ -122,9 +128,27 @@ export function MediaBrowser({
                   <span className="text-theme-xs font-normal text-gray-400 dark:text-gray-500">
                     {sec.items.length} 项
                   </span>
+                  {selection && onSelectMany && (() => {
+                    const all = sec.items.every((m) => selection.selected.has(mediaKey(m)));
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => onSelectMany(sec.items, !all)}
+                        className="text-theme-xs font-medium text-brand-500 hover:text-brand-600 dark:text-brand-400"
+                      >
+                        {all ? "取消本组" : "全选本组"}
+                      </button>
+                    );
+                  })()}
                 </h2>
               )}
-              <MediaGrid items={sec.items} linkTo={linkTo} sources={sources} onOpenPhoto={openPhoto} />
+              <MediaGrid
+                items={sec.items}
+                linkTo={linkTo}
+                sources={sources}
+                onOpenPhoto={openPhoto}
+                selection={selection}
+              />
             </section>
           ))}
         </div>
@@ -135,6 +159,7 @@ export function MediaBrowser({
           sources={sources}
           emptyLabel={emptyLabel}
           onOpenPhoto={openPhoto}
+          selection={selection}
         />
       )}
       {openIdx !== null && (

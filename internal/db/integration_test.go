@@ -483,8 +483,8 @@ func TestIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := d.AddToCollection(ctx, coll.ID, MediaKindVideo, vids[0]); err != nil { // idempotent
-		t.Fatal(err)
+	if n, err := d.AddToCollection(ctx, uid, coll.ID, MediaKindVideo, vids); err != nil || n != 0 { // idempotent
+		t.Fatalf("re-adding members added %d, %v", n, err)
 	}
 	for _, order := range []string{"", OrderFavDesc, OrderFavAsc, "date_desc"} {
 		var ref []favRow // the same walk over favorites-free ListMedia order
@@ -547,6 +547,14 @@ func TestIntegration(t *testing.T) {
 	}
 	if _, err := d.CollectionByID(ctx, uid2, coll.ID); !errors.Is(err, ErrCollectionNotFound) {
 		t.Fatalf("other user's CollectionByID = %v", err)
+	}
+	// ...nor add their own collection's items from uid's media.
+	coll2, err := d.CreateCollection(ctx, uid2, "别人的")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := d.AddToCollection(ctx, uid2, coll2.ID, MediaKindPhoto, phs); err != nil || n != 0 {
+		t.Fatalf("foreign media added %d, %v", n, err)
 	}
 	if err := d.RemoveFromCollection(ctx, uid2, coll.ID, MediaKindPhoto, phs[0]); err != nil {
 		t.Fatal(err)

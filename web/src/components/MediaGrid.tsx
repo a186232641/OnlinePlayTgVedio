@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 
 import { MediaItem, MediaSource } from "../api/client";
 import { useFavoriteState, useToggleFavorite } from "../favState";
-import { ClockIcon, ImageIcon, PlayIcon, StarIcon } from "./icons";
+import { CheckIcon, ClockIcon, ImageIcon, PlayIcon, StarIcon } from "./icons";
 import { EmptyState, cx } from "./ui";
 
 export function fmtDuration(s: number) {
@@ -51,6 +51,15 @@ function Thumb({ item }: { item: MediaItem }) {
       className="size-full bg-gray-100 object-cover transition-transform duration-200 group-hover:scale-[1.03] dark:bg-white/[0.04]"
     />
   );
+}
+
+// mediaKey identifies an item across both tables (ids are per table).
+export const mediaKey = (m: MediaItem) => `${m.kind}:${m.id}`;
+
+// Selection is a grid's multi-select mode: tiles toggle instead of opening.
+export interface Selection {
+  selected: Set<string>; // mediaKey
+  toggle: (m: MediaItem) => void;
 }
 
 // FavStar favorites a tile in place, without opening it. It is a sibling of
@@ -118,6 +127,7 @@ export function MediaGrid({
   onOpenPhoto,
   sources,
   emptyLabel = "暂无内容",
+  selection,
 }: {
   items: MediaItem[];
   linkTo?: (m: MediaItem) => string;
@@ -125,6 +135,8 @@ export function MediaGrid({
   // When given (cross-channel lists), each tile gets a link back to its origin.
   sources?: Record<string, MediaSource>;
   emptyLabel?: string;
+  // When given, the grid is in multi-select mode.
+  selection?: Selection;
 }) {
   if (items.length === 0) return <EmptyState title={emptyLabel} />;
 
@@ -173,8 +185,12 @@ export function MediaGrid({
         // The clickable tile and the source links must be siblings: an <a>
         // inside an <a> (or a <button>) is invalid and the inner click is lost.
         const hit = "group flex flex-1 flex-col text-left";
-        const body =
-          m.kind === "photo" ? (
+        const picked = !!selection?.selected.has(mediaKey(m));
+        const body = selection ? (
+          <button type="button" onClick={() => selection.toggle(m)} aria-pressed={picked} className={hit}>
+            {tile}
+          </button>
+        ) : m.kind === "photo" ? (
             <button type="button" onClick={() => onOpenPhoto?.(m)} className={hit}>
               {tile}
             </button>
@@ -187,10 +203,25 @@ export function MediaGrid({
         return (
           <div
             key={key}
-            className="card group/card relative flex flex-col overflow-hidden p-0 transition-colors hover:border-brand-300 dark:hover:border-brand-500/40"
+            className={cx(
+              "card group/card relative flex flex-col overflow-hidden p-0 transition-colors hover:border-brand-300 dark:hover:border-brand-500/40",
+              picked && "border-brand-500 ring-2 ring-brand-500 dark:border-brand-500",
+            )}
           >
             {body}
-            <FavStar item={m} />
+            {selection ? (
+              <span
+                aria-hidden
+                className={cx(
+                  "pointer-events-none absolute left-2 top-2 z-10 flex size-6 items-center justify-center rounded-md border-2 shadow-theme-xs",
+                  picked ? "border-brand-500 bg-brand-500 text-white" : "border-white bg-black/30",
+                )}
+              >
+                {picked && <CheckIcon className="size-4" />}
+              </span>
+            ) : (
+              <FavStar item={m} />
+            )}
             {src && <SourceLine src={src} />}
           </div>
         );

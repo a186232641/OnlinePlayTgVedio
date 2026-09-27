@@ -336,7 +336,13 @@ added" and `favKeyset` pages both the same way; the API still names that time `f
 Routes: `/collections/` (+ `?kind=&id=` adds `contains` for the picker), `/{id}`, `/{id}/media`,
 `/{id}/items`, `/{id}/items/{kind}/{item_id}`. UI: a "我的分组" tab on the favorites page
 (`group=collection`), the `/collections/:id` page, and `CollectionPicker` ("加入分组") in the
-player and the image viewer; the player's `?coll=` playlist mirrors `?fav=`.
+player and the image viewer; the player's `?coll=` playlist mirrors `?fav=`. `POST /{id}/items` also takes
+`{"items":[…]}` — the favorites page's "多选" mode (`MediaBrowser`/`MediaGrid` `selection`) adds a
+whole selection at once; ownership of the media is checked inside the INSERT, so foreign or
+missing ids are skipped and `added` counts only new members.
+
+A page's "返回…" link is a `BackBar`: sticky under the h-16 header, so it survives scrolling a long
+list. It must be the page's first child (its negative margins cancel the page gutter).
 
 `channels.video_count` / `photo_count` are what the list endpoints report as totals, not a live
 `COUNT(*)`: on a million-row channel counting twice per first page costs hundreds of milliseconds
@@ -371,7 +377,7 @@ Its rules, as implemented:
   `btn`/`btn-primary`/`btn-secondary`/`btn-ghost`/`btn-danger`/`btn-sm`, `input`, `select`, `nav-item`,
   `badge-*`. Reach for these before writing a new utility soup.
 - **Shared React primitives in `components/ui.tsx`** (`PageHeader`, `Card`, `FilterBar`, `EmptyState`,
-  `LoadingState`, `AlertStrip`, `MoreFooter`, `Toggle`, `cx`) and inline SVGs in `components/icons.tsx`
+  `LoadingState`, `AlertStrip`, `MoreFooter`, `Toggle`, `BackBar`, `cx`) and inline SVGs in `components/icons.tsx`
   — no icon library dependency.
 - **Dark mode is class-based and full-parity.** A pre-paint script in `web/index.html` applies the
   stored polarity before first render; `src/theme.ts` owns the toggle. The `tgv-theme` localStorage

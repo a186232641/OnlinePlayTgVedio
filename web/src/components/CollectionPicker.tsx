@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useEffect, useRef, useState } from "react";
 
-import { api, Collection } from "../api/client";
+import { api, Collection, MediaItem } from "../api/client";
 import { CheckIcon, FolderIcon, PlusIcon } from "./icons";
 import { cx } from "./ui";
 
@@ -149,6 +149,120 @@ export function CollectionPicker({
               onChange={(e) => setName(e.target.value)}
             />
             <button className="btn btn-primary btn-sm" disabled={!name.trim() || create.isPending} title="新建并加入">
+              <PlusIcon className="size-4" />
+            </button>
+          </form>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// AddToCollectionMenu is the multi-select bar's "加入分组": pick a collection
+// (or name a new one) and every selected item is added in one request. It
+// opens upward, since it lives in a bar at the bottom of the screen. Items
+// already in the group are skipped server-side; onAdded reports how many were
+// new, for the bar's confirmation.
+export function AddToCollectionMenu({
+  items,
+  onAdded,
+}: {
+  items: MediaItem[];
+  onAdded: (collection: string, added: number) => void;
+}) {
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const root = useRef<HTMLDivElement | null>(null);
+
+  const list = useQuery<{ items: Collection[] }>({
+    queryKey: ["collections", "list"],
+    queryFn: () => api.get("/api/collections/"),
+    enabled: open,
+  });
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent | TouchEvent) => {
+      if (root.current && !root.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("touchstart", onDown);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("touchstart", onDown);
+    };
+  }, [open]);
+
+  const add = useMutation({
+    mutationFn: async (target: { id?: number; name: string }) => {
+      const id = target.id ?? (await api.post<Collection>("/api/collections/", { name: target.name })).id;
+      const res = await api.post<{ added: number }>(`/api/collections/${id}/items`, {
+        items: items.map((m) => ({ kind: m.kind, id: m.id })),
+      });
+      return { name: target.name, added: res.added };
+    },
+    onSuccess: ({ name: n, added }) => {
+      setOpen(false);
+      setName("");
+      qc.invalidateQueries({ queryKey: ["collections"] });
+      onAdded(n, added);
+    },
+    onError: (e: Error) => alert(`加入分组失败: ${e.message}`),
+  });
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    const n = name.trim();
+    if (n) add.mutate({ name: n });
+  };
+
+  return (
+    <div ref={root} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        disabled={items.length === 0 || add.isPending}
+        className="btn btn-primary btn-sm"
+      >
+        <FolderIcon className="size-4" />
+        {add.isPending ? "加入中…" : "加入分组"}
+      </button>
+      {open && (
+        <div className="absolute bottom-full right-0 z-50 mb-2 w-64 rounded-2xl border border-gray-200 bg-white p-2 text-gray-700 shadow-theme-lg dark:border-gray-800 dark:bg-gray-dark dark:text-gray-300">
+          <div className="px-2 pb-1.5 pt-1 text-theme-xs font-medium text-gray-500 dark:text-gray-400">
+            把 {items.length} 项加入分组
+          </div>
+          <div className="custom-scrollbar max-h-64 overflow-y-auto">
+            {list.isLoading ? (
+              <div className="px-2 py-3 text-theme-xs text-gray-400">加载中…</div>
+            ) : (list.data?.items ?? []).length === 0 ? (
+              <div className="px-2 py-3 text-theme-xs text-gray-400">还没有分组,在下面新建一个</div>
+            ) : (
+              list.data!.items.map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => add.mutate({ id: c.id, name: c.name })}
+                  disabled={add.isPending}
+                  className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-theme-sm transition-colors hover:bg-gray-100 disabled:opacity-60 dark:hover:bg-white/[0.06]"
+                >
+                  <FolderIcon className="size-4 shrink-0 text-gray-400" />
+                  <span className="min-w-0 flex-1 truncate">{c.name}</span>
+                  <span className="shrink-0 text-theme-xs tabular-nums text-gray-400">{c.videos + c.photos}</span>
+                </button>
+              ))
+            )}
+          </div>
+          <form onSubmit={submit} className="mt-1 flex gap-1.5 border-t border-gray-200 px-1 pt-2 dark:border-gray-800">
+            <input
+              className="field field-sm min-w-0 flex-1"
+              placeholder="新建分组并加入…"
+              maxLength={64}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+            <button className="btn btn-primary btn-sm" disabled={!name.trim() || add.isPending} title="新建并加入">
               <PlusIcon className="size-4" />
             </button>
           </form>

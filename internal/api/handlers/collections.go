@@ -254,15 +254,21 @@ func (h *CollectionsHandlers) Media(w http.ResponseWriter, r *http.Request) {
 	writeMediaPage(w, items, next, hasMore, map[string]any{"sources": sources})
 }
 
-// memberReq names one media row: {"kind": "video"|"photo", "id": N}.
-type memberReq struct {
+// memberRef names one media row: {"kind": "video"|"photo", "id": N}.
+type memberRef struct {
 	Kind string `json:"kind"`
 	ID   int64  `json:"id"`
 }
 
-// AddItem puts a video or image into the collection.
+// maxBatchItems bounds one bulk add (a multi-select of loaded favorites).
+const maxBatchItems = 2000
+
+// AddItem puts videos/images into the collection — one ({"kind","id"}) or a
+// multi-select batch ({"items": [...]}). Rows that aren't the user's are
+// skipped; `added` counts the ones that are new to the collection.
 //
 // POST /api/collections/:id/items   body: {"kind": "photo", "id": 12}
+//                                     or {"items": [{"kind": "video", "id": 3}, …]}
 func (h *CollectionsHandlers) AddItem(w http.ResponseWriter, r *http.Request) {
 	c, err := h.collection(r)
 	if err != nil {
@@ -270,31 +276,41 @@ func (h *CollectionsHandlers) AddItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uid, _ := web.UserIDFromContext(r.Context())
-	var req memberReq
+	var req struct {
+		memberRef
+		Items []memberRef `json:"items"`
+	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, err)
 		return
 	}
-	kind := normalizeKind(req.Kind)
-	if kind == "" || req.ID == 0 {
-		httpx.WriteError(w, httpx.Errorf(http.StatusBadRequest, "bad_item", "kind (video|photo) and id are required"))
+	refs := req.Items
+	if len(refs) == 0 {
+		refs = []memberRef{req.memberRef}
+	}
+	if len(refs) > maxBatchItems {
+		httpx.WriteError(w, httpx.Errorf(http.StatusBadRequest, "too_many", "too many items in one request"))
 		return
 	}
-	// The media row must be the user's too.
-	if kind == db.MediaKindPhoto {
-		_, err = h.DB.PhotoByID(r.Context(), req.ID, uid)
-	} else {
-		_, err = h.DB.VideoByID(r.Context(), req.ID, uid)
+	ids := map[string][]int64{}
+	for _, m := range refs {
+		kind := normalizeKind(m.Kind)
+		if kind == "" || m.ID == 0 {
+			httpx.WriteError(w, httpx.Errorf(http.StatusBadRequest, "bad_item", "kind (video|photo) and id are required"))
+			return
+		}
+		ids[kind] = append(ids[kind], m.ID)
 	}
-	if err != nil {
-		httpx.WriteError(w, httpx.Errorf(http.StatusNotFound, "not_found", kind+" not found"))
-		return
+	var added int64
+	for kind, list := range ids {
+		n, err := h.DB.AddToCollection(r.Context(), uid, c.ID, kind, list)
+		if err != nil {
+			httpx.WriteError(w, err)
+			return
+		}
+		added += n
 	}
-	if err := h.DB.AddToCollection(r.Context(), c.ID, kind, req.ID); err != nil {
-		httpx.WriteError(w, err)
-		return
-	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "added": added})
 }
 
 // RemoveItem takes a video or image out of the collection.
