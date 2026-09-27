@@ -292,15 +292,18 @@ type SearchPhotosOpts struct {
 	OffsetID  int64
 	OrderBy   string
 	FavOnly   bool
+	// CollectionID: see SearchVideosOpts.
+	CollectionID int64
 }
 
 func (d *DB) SearchPhotos(ctx context.Context, opt SearchPhotosOpts) ([]Photo, error) {
 	if opt.Limit <= 0 || opt.Limit > 500 {
 		opt.Limit = 200
 	}
-	opt.OrderBy = normalizeFavOrder(opt.OrderBy, opt.FavOnly)
 	args := []any{opt.UserID}
 	where := []string{"p.user_id=$1"}
+	mem := membershipFor(opt.FavOnly, opt.CollectionID, "photo_favorites", "collection_photos", "photo_id", &args)
+	opt.OrderBy = normalizeFavOrder(opt.OrderBy, mem != nil)
 	if opt.Q != "" {
 		args = append(args, "%"+opt.Q+"%")
 		i := itoa(len(args))
@@ -329,7 +332,7 @@ func (d *DB) SearchPhotos(ctx context.Context, opt SearchPhotosOpts) ([]Photo, e
 	if opt.OffsetID > 0 {
 		args = append(args, opt.OffsetID)
 		if isFavOrder(opt.OrderBy) {
-			where = append(where, favKeyset("photo_favorites", "photo_id", "p", opt.OrderBy, itoa(len(args))))
+			where = append(where, favKeyset(mem, "p", opt.OrderBy, itoa(len(args))))
 		} else {
 			where = append(where, keysetCursorOn("photos", "p", opt.OrderBy, itoa(len(args)), false))
 		}
@@ -338,9 +341,9 @@ func (d *DB) SearchPhotos(ctx context.Context, opt SearchPhotosOpts) ([]Photo, e
 	cols := photoCols
 	from := `FROM photos p `
 	order := orderClauseOn("p", opt.OrderBy, false)
-	if opt.FavOnly {
+	if mem != nil {
 		cols += `, f.created_at`
-		from += `JOIN photo_favorites f ON f.photo_id=p.id AND f.user_id=p.user_id `
+		from += mem.join("p")
 		if isFavOrder(opt.OrderBy) {
 			order = favOrderClause("p", opt.OrderBy)
 		}
@@ -356,14 +359,14 @@ func (d *DB) SearchPhotos(ctx context.Context, opt SearchPhotosOpts) ([]Photo, e
 	for rows.Next() {
 		var favAt time.Time
 		var extra []any
-		if opt.FavOnly {
+		if mem != nil {
 			extra = []any{&favAt}
 		}
 		p, err := scanPhoto(rows, extra...)
 		if err != nil {
 			return nil, err
 		}
-		if opt.FavOnly {
+		if mem != nil {
 			p.FavoritedAt = &favAt
 		}
 		out = append(out, *p)

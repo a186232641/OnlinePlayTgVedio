@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sort"
 	"strconv"
@@ -39,6 +40,7 @@ func TestIntegration(t *testing.T) {
 
 	// clean slate
 	for _, q := range []string{
+		"DELETE FROM collections",
 		"DELETE FROM photo_favorites", "DELETE FROM favorites", "DELETE FROM cache_entries",
 		"DELETE FROM photos", "DELETE FROM videos", "DELETE FROM channels",
 		"DELETE FROM tg_sessions", "DELETE FROM users",
@@ -437,6 +439,124 @@ func TestIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := d.Exec(ctx, `DELETE FROM photo_favorites WHERE user_id=$1 AND photo_id<>$2`, uid, pid); err != nil {
+		t.Fatal(err)
+	}
+
+	// --- collections ------------------------------------------------------
+	// Every row of the topic goes into one collection with the same tied
+	// timestamps as the favorites walk above, so the expected order is the
+	// same; favorites now hold only vid + pid, which shows the two are
+	// independent.
+	coll, err := d.CreateCollection(ctx, uid, "最爱")
+	if err != nil {
+		t.Fatal("CreateCollection:", err)
+	}
+	if _, err := d.CreateCollection(ctx, uid, "最爱"); err == nil {
+		t.Fatal("duplicate collection name should fail")
+	}
+	if c, err := d.CollectionByID(ctx, uid, coll.ID); err != nil || c.Videos != 0 || c.LastAddedAt != nil || c.CoverID != 0 {
+		t.Fatalf("empty collection = %+v, %v", c, err)
+	}
+	for _, f := range favs {
+		table, fk := collectionMemberTable(f.kind)
+		if _, err := d.Exec(ctx, `INSERT INTO `+table+` (collection_id, `+fk+`, created_at) VALUES ($1,$2,$3)`, coll.ID, f.id, f.at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := d.AddToCollection(ctx, coll.ID, MediaKindVideo, vids[0]); err != nil { // idempotent
+		t.Fatal(err)
+	}
+	for _, order := range []string{"", OrderFavDesc, OrderFavAsc, "date_desc"} {
+		var ref []favRow // the same walk over favorites-free ListMedia order
+		for _, limit := range []int{1, 3, 500} {
+			var got []favRow
+			cur := MediaCursor{}
+			for guard := 0; ; guard++ {
+				if guard > 200 {
+					t.Fatalf("collection order %q limit %d: pagination did not terminate", order, limit)
+				}
+				items, next, more, err := d.ListMedia(ctx, ListMediaOpts{
+					UserID: uid, CollectionID: coll.ID, OrderBy: order, Limit: limit, Cursor: cur,
+				})
+				if err != nil {
+					t.Fatalf("collection order %q: %v", order, err)
+				}
+				for _, it := range items {
+					if it.favoritedAt() == nil {
+						t.Fatalf("collection row without added time")
+					}
+					got = append(got, favRow{it.Kind, it.id(), *it.favoritedAt()})
+				}
+				if !more {
+					break
+				}
+				cur = next
+			}
+			if len(got) != len(favs) {
+				t.Fatalf("collection order %q limit %d: %d rows, want %d", order, limit, len(got), len(favs))
+			}
+			if ref == nil {
+				ref = got
+				continue
+			}
+			for i := range ref {
+				if got[i].kind != ref[i].kind || got[i].id != ref[i].id {
+					t.Fatalf("collection order %q limit %d: position %d differs from limit 1", order, limit, i)
+				}
+			}
+		}
+		if order == "" || order == OrderFavDesc {
+			for i := 1; i < len(ref); i++ {
+				if ref[i].at.After(ref[i-1].at) {
+					t.Fatalf("collection default order not newest-added first at %d", i)
+				}
+			}
+		}
+	}
+	if c, err := d.CollectionByID(ctx, uid, coll.ID); err != nil ||
+		c.Videos != int64(len(vids)) || c.Photos != int64(len(phs)) || c.LastAddedAt == nil || c.CoverID == 0 {
+		t.Fatalf("collection summary = %+v, %v", c, err)
+	}
+	if held, err := d.CollectionsContaining(ctx, uid, MediaKindPhoto, phs[0]); err != nil || !held[coll.ID] {
+		t.Fatalf("CollectionsContaining = %v, %v", held, err)
+	}
+	// Another user can neither see nor edit it.
+	var uid2 int64
+	if err := d.QueryRow(ctx, `INSERT INTO users (email, password_hash) VALUES ('x@y.z','x') RETURNING id`).Scan(&uid2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.CollectionByID(ctx, uid2, coll.ID); !errors.Is(err, ErrCollectionNotFound) {
+		t.Fatalf("other user's CollectionByID = %v", err)
+	}
+	if err := d.RemoveFromCollection(ctx, uid2, coll.ID, MediaKindPhoto, phs[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RenameCollection(ctx, uid2, coll.ID, "x"); !errors.Is(err, ErrCollectionNotFound) {
+		t.Fatalf("other user's rename = %v", err)
+	}
+	if err := d.RemoveFromCollection(ctx, uid, coll.ID, MediaKindPhoto, phs[0]); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := d.CollectionByID(ctx, uid, coll.ID); c.Photos != int64(len(phs)-1) {
+		t.Fatalf("after remove: %d photos, want %d", c.Photos, len(phs)-1)
+	}
+	if cs, err := d.ListCollections(ctx, uid); err != nil || len(cs) != 1 {
+		t.Fatalf("ListCollections = %+v, %v", cs, err)
+	}
+	if err := d.DeleteCollection(ctx, uid, coll.ID); err != nil {
+		t.Fatal(err)
+	}
+	var left int
+	_ = d.QueryRow(ctx, `SELECT (SELECT count(*) FROM collection_videos) + (SELECT count(*) FROM collection_photos)`).Scan(&left)
+	if left != 0 {
+		t.Fatalf("delete left %d membership rows", left)
+	}
+	// Favorites are untouched by all of the above.
+	items, _, _, err = d.ListMedia(ctx, ListMediaOpts{UserID: uid, FavOnly: true, Limit: 100})
+	if err != nil || len(items) != 2 {
+		t.Fatalf("favorites after collection ops = %d rows, %v", len(items), err)
+	}
+	if _, err := d.Exec(ctx, `DELETE FROM users WHERE id=$1`, uid2); err != nil {
 		t.Fatal(err)
 	}
 

@@ -58,8 +58,9 @@ type Video struct {
 	ThumbSize string
 	ThumbPath string
 
-	// FavoritedAt is when the listing user favorited this row. Not a videos
-	// column: it is filled only by favorites queries (FavOnly), from the join.
+	// FavoritedAt is when the row was added to the listing's membership — the
+	// user's favorites, or a collection. Not a videos column: it is filled only
+	// by those listings, from the join.
 	FavoritedAt *time.Time
 }
 
@@ -358,17 +359,46 @@ func normalizeFavOrder(orderBy string, favOnly bool) string {
 	return orderBy
 }
 
-// favKeyset is the cursor for favorite-time ordering. favorites.created_at is
-// NOT NULL, so unlike keysetCursorOn there is no NULL tail to handle and a row
-// comparison is exact. The boundary's favorite time is looked up by id, scoped
-// to the listing user ($1 in every list query).
-func favKeyset(favTable, favIDCol, alias, orderBy, p string) string {
+// membership is the table a listing is restricted to — the user's favorites,
+// or one of their collections — joined as alias f. Its created_at is when the
+// row was added, which is what the fav_* orders sort on, so a collection pages
+// and sorts exactly like favorites.
+type membership struct {
+	table    string // favorites / photo_favorites / collection_videos / collection_photos
+	fk       string // video_id / photo_id
+	scopeCol string // user_id / collection_id
+	scopeArg string // placeholder holding the scope value, e.g. "$1"
+}
+
+// membershipFor picks the join for a listing: a collection if one is given,
+// else the user's favorites if favOnly, else none. A collection's id is added
+// to args; favorites scope by the listing user, always $1.
+func membershipFor(favOnly bool, collectionID int64, favTable, collTable, fk string, args *[]any) *membership {
+	switch {
+	case collectionID != 0:
+		*args = append(*args, collectionID)
+		return &membership{collTable, fk, "collection_id", "$" + itoa(len(*args))}
+	case favOnly:
+		return &membership{favTable, fk, "user_id", "$1"}
+	}
+	return nil
+}
+
+func (m *membership) join(alias string) string {
+	return "JOIN " + m.table + " f ON f." + m.fk + "=" + alias + ".id AND f." + m.scopeCol + "=" + m.scopeArg + " "
+}
+
+// favKeyset is the cursor for added-time ordering. created_at is NOT NULL, so
+// unlike keysetCursorOn there is no NULL tail to handle and a row comparison is
+// exact. The boundary's added time is looked up by id within the same scope.
+func favKeyset(m *membership, alias, orderBy, p string) string {
 	cmp := "<"
 	if orderBy == OrderFavAsc {
 		cmp = ">"
 	}
 	return "(f.created_at, " + alias + ".id) " + cmp +
-		" ((SELECT created_at FROM " + favTable + " WHERE user_id = $1 AND " + favIDCol + " = $" + p + "), $" + p + ")"
+		" ((SELECT created_at FROM " + m.table + " WHERE " + m.scopeCol + " = " + m.scopeArg +
+		" AND " + m.fk + " = $" + p + "), $" + p + ")"
 }
 
 func favOrderClause(alias, orderBy string) string {
@@ -509,6 +539,9 @@ type SearchVideosOpts struct {
 	OffsetID  int64
 	OrderBy   string
 	FavOnly   bool // restrict to the user's favorites (JOIN favorites)
+	// CollectionID restricts to one collection (JOIN collection_videos); the
+	// caller has checked it belongs to UserID. Takes precedence over FavOnly.
+	CollectionID int64
 
 	// StreamerFilter behaves exactly like ListVideosOpts': when true, Streamer
 	// == "" means the NULL bucket (filenames that don't match the pattern).
@@ -520,9 +553,10 @@ func (d *DB) SearchVideos(ctx context.Context, opt SearchVideosOpts) ([]Video, e
 	if opt.Limit <= 0 || opt.Limit > 500 {
 		opt.Limit = 200
 	}
-	opt.OrderBy = normalizeFavOrder(opt.OrderBy, opt.FavOnly)
 	args := []any{opt.UserID}
 	where := []string{"v.user_id=$1"}
+	mem := membershipFor(opt.FavOnly, opt.CollectionID, "favorites", "collection_videos", "video_id", &args)
+	opt.OrderBy = normalizeFavOrder(opt.OrderBy, mem != nil)
 	if opt.Q != "" {
 		args = append(args, "%"+opt.Q+"%")
 		i := itoa(len(args))
@@ -559,7 +593,7 @@ func (d *DB) SearchVideos(ctx context.Context, opt SearchVideosOpts) ([]Video, e
 	if opt.OffsetID > 0 {
 		args = append(args, opt.OffsetID)
 		if isFavOrder(opt.OrderBy) {
-			where = append(where, favKeyset("favorites", "video_id", "v", opt.OrderBy, itoa(len(args))))
+			where = append(where, favKeyset(mem, "v", opt.OrderBy, itoa(len(args))))
 		} else {
 			where = append(where, keysetCursor(opt.OrderBy, itoa(len(args))))
 		}
@@ -568,11 +602,11 @@ func (d *DB) SearchVideos(ctx context.Context, opt SearchVideosOpts) ([]Video, e
 	cols := videoCols
 	from := `FROM videos v `
 	order := orderClause(opt.OrderBy)
-	if opt.FavOnly {
-		// Also return when each row was favorited: the favorites page groups by
+	if mem != nil {
+		// Also return when each row was added: the favorites page groups by
 		// it, and the merged video+photo list sorts on it.
 		cols += `, f.created_at`
-		from += `JOIN favorites f ON f.video_id=v.id AND f.user_id=v.user_id `
+		from += mem.join("v")
 		if isFavOrder(opt.OrderBy) {
 			order = favOrderClause("v", opt.OrderBy)
 		}
@@ -588,14 +622,14 @@ func (d *DB) SearchVideos(ctx context.Context, opt SearchVideosOpts) ([]Video, e
 	for rows.Next() {
 		var favAt time.Time
 		var extra []any
-		if opt.FavOnly {
+		if mem != nil {
 			extra = []any{&favAt}
 		}
 		v, err := scanVideo(rows, extra...)
 		if err != nil {
 			return nil, err
 		}
-		if opt.FavOnly {
+		if mem != nil {
 			v.FavoritedAt = &favAt
 		}
 		out = append(out, *v)

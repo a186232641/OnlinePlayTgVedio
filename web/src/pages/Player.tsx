@@ -3,9 +3,10 @@ import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClie
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import mpegts from "mpegts.js";
 
-import { api, Channel, MediaCursor, MediaItem, MediaPage, Video } from "../api/client";
+import { api, Channel, Collection, MediaCursor, MediaItem, MediaPage, Video } from "../api/client";
 import { ChevronLeftIcon, ChevronRightIcon, PlayIcon, StarIcon } from "../components/icons";
 import { LoadingState, Spinner, cx } from "../components/ui";
+import { CollectionPicker } from "../components/CollectionPicker";
 
 interface VideoResp { video: Video; favorite: boolean }
 
@@ -23,6 +24,7 @@ const PLAYLIST_PAGE_SIZE = 500;
 //   ?q=foo&ch=13            → search results (optionally channel-scoped)
 //   ?text=...&date_from=... → advanced search filters
 //   ?fav=1                  → favorites
+//   ?coll=7                 → one of the user's collections
 //
 // Every branch hits the merged media endpoints with kind=video: the playlist is
 // a queue of things to *play*, and an image in it would have nowhere to go.
@@ -43,6 +45,15 @@ function playlistRequest(p: URLSearchParams): string | null {
     if (order) qs.set("order", order);
     return qs;
   };
+
+  const coll = p.get("coll");
+  if (coll) {
+    const qs = base();
+    if (fileName) qs.set("file_name", fileName);
+    if (dateFrom) qs.set("date_from", dateFrom);
+    if (dateTo) qs.set("date_to", dateTo);
+    return `/api/collections/${coll}/media?${qs}`;
+  }
 
   if (fav) {
     const qs = base();
@@ -85,7 +96,7 @@ function playlistRequest(p: URLSearchParams): string | null {
 // filters, and the search page also sets ?ch when a channel is picked, so
 // "fav" is checked first, then the search-page fields, and only then a bare
 // channel/topic context (whose own search uses ?q, not ?text/?file_name).
-type Back = { to: string; kind: "fav" | "search" | "channel" | "home"; ch?: string };
+type Back = { to: string; kind: "coll" | "fav" | "search" | "channel" | "home"; ch?: string };
 
 function backTarget(p: URLSearchParams): Back {
   const pick = (keys: string[], rename: Record<string, string> = {}) => {
@@ -97,6 +108,10 @@ function backTarget(p: URLSearchParams): Back {
     return qs ? `?${qs}` : "";
   };
 
+  const coll = p.get("coll");
+  if (coll) {
+    return { kind: "coll", ch: coll, to: `/collections/${coll}${pick(["file_name", "date_from", "date_to", "order", "kind"])}` };
+  }
   if (p.get("fav")) {
     return { kind: "fav", to: `/favorites${pick(["file_name", "date_from", "date_to", "order", "kind", "channel_id", "streamer"])}` };
   }
@@ -281,10 +296,11 @@ export function Player() {
   // the next item keeps the same list); it only re-anchors when the current
   // video isn't in the loaded window at all.
   const baseURL = playlistRequest(searchParams);
-  // A favorites playlist with no explicit order uses the backend's favorites
-  // default (favorite time, newest first) — mirror that, or the reverse order
+  // A favorites (or collection) playlist with no explicit order uses the
+  // backend's default there (time added, newest first) — mirror that, or the reverse order
   // for "加载上一页" would be computed from the wrong sort.
-  const order = searchParams.get("order") ?? (searchParams.get("fav") ? "fav_desc" : null);
+  const order =
+    searchParams.get("order") ?? (searchParams.get("fav") || searchParams.get("coll") ? "fav_desc" : null);
   const reverseOrder = flipOrder(order);
   const [anchor, setAnchor] = useState(() => Number(id));
   const playlist = useInfiniteQuery<PlaylistPage>({
@@ -519,8 +535,15 @@ export function Player() {
     queryFn: () => api.get(`/api/channels/${back.ch}`),
     enabled: back.kind === "channel",
   });
+  const backColl = useQuery<Collection>({
+    queryKey: ["collections", "one", back.ch],
+    queryFn: () => api.get(`/api/collections/${back.ch}`),
+    enabled: back.kind === "coll",
+  });
   const backLabel =
-    back.kind === "fav"
+    back.kind === "coll"
+      ? backColl.data ? `返回分组「${backColl.data.name}」` : "返回分组"
+      : back.kind === "fav"
       ? "返回收藏"
       : back.kind === "search"
         ? "返回搜索结果"
@@ -639,6 +662,7 @@ export function Player() {
                     <StarIcon filled={isFav} className="size-4" />
                     {isFav ? "已收藏" : "收藏"}
                   </button>
+                  <CollectionPicker kind="video" id={v.id} />
                   {hasPlaylist && (
                     <div className="flex gap-2">
                       <button

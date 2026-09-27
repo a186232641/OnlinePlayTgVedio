@@ -6,13 +6,19 @@ import { api, ApiError, FavoriteGroup, FavoriteGroupBy, MediaItem, MediaKindFilt
 import { MEDIA_PAGE_SIZE, normalizeKind, useMediaPages } from "../api/media";
 import { KindTabs, MediaBrowser } from "../components/MediaBrowser";
 import { SortSelect, SortValue, normalizeSort, FAV_DEFAULT_SORT, FAV_SORT_OPTIONS } from "../components/SortSelect";
-import { ChevronLeftIcon, GridIcon, ImageIcon, PlayIcon, TopicsIcon, UsersIcon } from "../components/icons";
+import { CollectionCards } from "../components/CollectionCards";
+import { Cover } from "../components/Cover";
+import { ChevronLeftIcon, FolderIcon, GridIcon, TopicsIcon, UsersIcon } from "../components/icons";
+import { dayLabel, groupFor } from "../dates";
 import { AlertStrip, EmptyState, LoadingState, MoreFooter, PageHeader, cx } from "../components/ui";
 
 // The favorites page shows either every item or one card per group (`group`,
 // the server's ?by=). Opening a card is the item view scoped by that group's
 // filter: channelId for a source, streamer for a streamer.
-type GroupView = "" | FavoriteGroupBy;
+// "collection" is not a favorites grouping but the user's own groups
+// (collections), shown here as a tab because that is where people look for
+// "我的分组"; its cards open /collections/:id.
+type GroupView = "" | FavoriteGroupBy | "collection";
 
 interface Filters {
   fileName: string;
@@ -45,8 +51,8 @@ function filtersFromParams(p: URLSearchParams): Filters {
     group:
       p.has("channel_id") || p.has("streamer")
         ? ""
-        : p.get("group") === "source" || p.get("group") === "streamer"
-          ? (p.get("group") as FavoriteGroupBy)
+        : ["source", "streamer", "collection"].includes(p.get("group") ?? "")
+          ? (p.get("group") as GroupView)
           : "",
     channelId: p.get("channel_id") ?? "",
     streamer: p.has("streamer") ? (p.get("streamer") ?? "") : null,
@@ -64,30 +70,6 @@ function paramsFromFilters(f: Filters): URLSearchParams {
   if (f.channelId) p.set("channel_id", f.channelId);
   if (f.streamer !== null) p.set("streamer", f.streamer);
   return p;
-}
-
-// dayLabel turns a timestamp into a section heading in the viewer's local time:
-// 今天 / 昨天 / 2026-09-14 (周一).
-const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
-function dayLabel(iso?: string): string | null {
-  if (!iso) return null;
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return null;
-  const startOf = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
-  const days = Math.round((startOf(new Date()) - startOf(d)) / 86_400_000);
-  if (days === 0) return "今天";
-  if (days === 1) return "昨天";
-  const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  return `${ymd} (${WEEKDAYS[d.getDay()]})`;
-}
-
-// groupFor picks the day to group by for the active sort: favorite time when
-// sorted by it, publish date when sorted by date, nothing for name sorts (a
-// name order scatters any one day across the whole list).
-function groupFor(order: SortValue): ((m: MediaItem) => string | null) | undefined {
-  if (order.startsWith("fav")) return (m) => dayLabel(m.favorited_at);
-  if (order.startsWith("date")) return (m) => dayLabel(m.date) ?? "未知日期";
-  return undefined;
 }
 
 export function Favorites() {
@@ -117,6 +99,19 @@ export function Favorites() {
       onChange={(group) => patch({ group, channelId: "", streamer: null })}
     />
   );
+
+  if (submitted.group === "collection") {
+    return (
+      <div className="space-y-5 p-4 md:p-6">
+        <PageHeader
+          title="收藏"
+          meta="我的分组 — 把喜欢的视频和图片(不限主播、话题)放进自己建的分组;与收藏相互独立"
+          actions={groupTabs}
+        />
+        <CollectionCards />
+      </div>
+    );
+  }
 
   if (grouped) {
     const by = submitted.group as FavoriteGroupBy;
@@ -329,6 +324,7 @@ const GROUP_TABS: { value: GroupView; label: string; Icon: typeof GridIcon }[] =
   { value: "", label: "全部收藏", Icon: GridIcon },
   { value: "source", label: "按话题", Icon: TopicsIcon },
   { value: "streamer", label: "按主播", Icon: UsersIcon },
+  { value: "collection", label: "我的分组", Icon: FolderIcon },
 ];
 
 function GroupTabs({ value, onChange }: { value: GroupView; onChange: (v: GroupView) => void }) {
@@ -351,27 +347,6 @@ function GroupTabs({ value, onChange }: { value: GroupView; onChange: (v: GroupV
         </button>
       ))}
     </div>
-  );
-}
-
-function Cover({ g }: { g: FavoriteGroup }) {
-  const [failed, setFailed] = useState(false);
-  if (failed) {
-    return (
-      <div className="flex size-full items-center justify-center bg-gray-100 text-gray-300 dark:bg-white/[0.04] dark:text-gray-600">
-        {g.cover_kind === "video" ? <PlayIcon className="size-8" /> : <ImageIcon className="size-8" />}
-      </div>
-    );
-  }
-  return (
-    <img
-      src={g.cover_thumb_url}
-      alt=""
-      loading="lazy"
-      decoding="async"
-      onError={() => setFailed(true)}
-      className="size-full bg-gray-100 object-cover transition-transform duration-200 group-hover:scale-[1.03] dark:bg-white/[0.04]"
-    />
   );
 }
 
@@ -418,7 +393,7 @@ function GroupCards({
             className="card group flex flex-col overflow-hidden p-0 transition-colors hover:border-brand-300 dark:hover:border-brand-500/40"
           >
             <div className="relative aspect-[4/3] w-full overflow-hidden rounded-t-2xl">
-              <Cover g={g} />
+              <Cover kind={g.cover_kind} src={g.cover_thumb_url} />
               <span className="absolute bottom-1.5 right-1.5 rounded-md bg-black/65 px-1.5 py-0.5 text-theme-xs tabular-nums text-white">
                 {(g.videos + g.photos).toLocaleString()} 条
               </span>

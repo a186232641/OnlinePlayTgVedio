@@ -84,9 +84,12 @@ type ListMediaOpts struct {
 	DateFrom  *time.Time
 	DateTo    *time.Time
 	FavOnly   bool
-	OrderBy   string
-	Limit     int
-	Cursor    MediaCursor
+	// CollectionID lists one collection (checked to be UserID's by the caller);
+	// like FavOnly it defaults to, and can sort by, the time added.
+	CollectionID int64
+	OrderBy      string
+	Limit        int
+	Cursor       MediaCursor
 
 	// StreamerFilter scopes to one streamer (a videos-only filename convention),
 	// which implies Kind == video.
@@ -120,7 +123,7 @@ func (d *DB) ListMedia(ctx context.Context, opt ListMediaOpts) ([]MediaItem, Med
 	}
 	// Resolve the effective order once here, so the merge below sorts on the
 	// same key the two branch queries did.
-	opt.OrderBy = normalizeFavOrder(opt.OrderBy, opt.FavOnly)
+	opt.OrderBy = normalizeFavOrder(opt.OrderBy, opt.FavOnly || opt.CollectionID != 0)
 
 	next := opt.Cursor
 	items := make([]MediaItem, 0, limit*2)
@@ -139,6 +142,8 @@ func (d *DB) ListMedia(ctx context.Context, opt ListMediaOpts) ([]MediaItem, Med
 			OrderBy:   opt.OrderBy,
 			Limit:     limit,
 			OffsetID:  opt.Cursor.VideoID,
+
+			CollectionID: opt.CollectionID,
 
 			StreamerFilter: opt.StreamerFilter,
 			Streamer:       opt.Streamer,
@@ -166,6 +171,8 @@ func (d *DB) ListMedia(ctx context.Context, opt ListMediaOpts) ([]MediaItem, Med
 			OrderBy:   opt.OrderBy,
 			Limit:     limit,
 			OffsetID:  opt.Cursor.PhotoID,
+
+			CollectionID: opt.CollectionID,
 		})
 		if err != nil {
 			return nil, next, false, err

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api, MediaItem } from "../api/client";
 import { ChevronLeftIcon, ChevronRightIcon, CloseIcon, StarIcon } from "../components/icons";
+import { CollectionPicker } from "./CollectionPicker";
 import { Spinner, cx } from "./ui";
 import { fmtSize } from "./MediaGrid";
 
@@ -117,6 +118,9 @@ export function Lightbox({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Typing in a field (the "加入分组" picker's name box) must not page.
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
       if (e.key === "Escape") onClose();
       if (e.key === "ArrowLeft") go(-1);
       if (e.key === "ArrowRight") go(1);
@@ -180,6 +184,7 @@ export function Lightbox({
             加载下一页
           </button>
         )}
+        <CollectionPicker kind="photo" id={item.id} variant="overlay" />
         <button
           type="button"
           onClick={() => fav.mutate()}

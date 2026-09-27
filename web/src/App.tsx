@@ -13,6 +13,7 @@ import { Channels } from "./pages/Channels";
 import { ChannelDetail } from "./pages/ChannelDetail";
 import { Player } from "./pages/Player";
 import { Favorites } from "./pages/Favorites";
+import { Collection } from "./pages/Collection";
 import { Search } from "./pages/Search";
 
 function useMe() {
@@ -42,6 +43,7 @@ export default function App() {
         <Route path="/channels/:id" element={<ChannelDetail />} />
         <Route path="/videos/:id" element={<Player />} />
         <Route path="/favorites" element={<Favorites />} />
+        <Route path="/collections/:id" element={<Collection />} />
         <Route path="/search" element={<Search />} />
         <Route path="/tg/bind" element={<TgBind />} />
         <Route path="/tg/accounts" element={<TgAccounts />} />

@@ -143,6 +143,21 @@ export interface MediaPage {
 
 export type MediaKindFilter = "" | "video" | "photo";
 
+// Collection is one of the user's own named groups of videos/images
+// ("我的分组"). Independent of favorites. `contains` is present only when the
+// list was asked about one media row (the "加入分组" picker).
+export interface Collection {
+  id: number;
+  name: string;
+  created_at: string;
+  videos: number;
+  photos: number;
+  last_added_at?: string;
+  cover_kind?: "video" | "photo";
+  cover_thumb_url?: string;
+  contains?: boolean;
+}
+
 // FavoriteGroupBy is what a grouped favorites view buckets by: the channel or
 // topic an item came from, or the streamer prefix of a video's filename.
 export type FavoriteGroupBy = "source" | "streamer";

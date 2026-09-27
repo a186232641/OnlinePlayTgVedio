@@ -53,6 +53,7 @@ func NewRouter(d Deps) http.Handler {
 		DB: database, OnAdd: d.OnFavAdd, OnRemove: d.OnFavRemove,
 		OnPhotoAdd: d.OnPhotoFavAdd, OnPhotoRemove: d.OnPhotoFavRemove,
 	}
+	collH := &handlers.CollectionsHandlers{DB: database}
 
 	r.Route("/api", func(r chi.Router) {
 		r.Route("/auth", func(r chi.Router) {
@@ -131,6 +132,17 @@ func NewRouter(d Deps) http.Handler {
 				r.Post("/", favH.Add)
 				r.Delete("/photo/{id}", favH.RemovePhoto)
 				r.Delete("/{video_id}", favH.Remove)
+			})
+
+			r.Route("/collections", func(r chi.Router) {
+				r.Get("/", collH.List)
+				r.Post("/", collH.Create)
+				r.Get("/{id}", collH.Get)
+				r.Patch("/{id}", collH.Rename)
+				r.Delete("/{id}", collH.Delete)
+				r.Get("/{id}/media", collH.Media)
+				r.Post("/{id}/items", collH.AddItem)
+				r.Delete("/{id}/items/{kind}/{item_id}", collH.RemoveItem)
 			})
 		})
 	})

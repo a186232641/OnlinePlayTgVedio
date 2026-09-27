@@ -17,6 +17,14 @@ export const FAV_SORT_OPTIONS = [
   ...SORT_OPTIONS,
 ] as const;
 
+// A collection sorts the same way, by when each item was added to it — the
+// backend treats fav_* on a collection listing as "time added".
+export const COLLECTION_SORT_OPTIONS = [
+  { value: "fav_desc", label: "加入时间 ↓ (最近加入优先)" },
+  { value: "fav_asc", label: "加入时间 ↑ (最早加入优先)" },
+  ...SORT_OPTIONS,
+] as const;
+
 export type SortValue = (typeof FAV_SORT_OPTIONS)[number]["value"];
 
 export const DEFAULT_SORT: SortValue = "date_desc";

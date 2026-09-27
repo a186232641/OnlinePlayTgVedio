@@ -319,6 +319,18 @@ with `?channel_id=<key>`; `streamer` groups by `videos.streamer` across channels
 carry both filters along. A new grouping is a new `by` value: a key expression in
 `FavoriteGroups`, the matching list filter, and a tab.
 
+**Collections ("我的分组")** are the user's own named groups of individual videos/images, any mix
+of channels, topics and streamers. They are **independent of favorites** (adding neither favorites
+nor pins in the cache — the user chose that). Membership is `collection_videos` /
+`collection_photos` (migration 0011, two id spaces like the favorites tables). Listing reuses
+`ListMedia` via `CollectionID`: `SearchVideos`/`SearchPhotos` pick a `membership` join
+(`membershipFor`) — favorites or a collection, always alias `f` — so `fav_*` orders mean "time
+added" and `favKeyset` pages both the same way; the API still names that time `favorited_at`.
+Routes: `/collections/` (+ `?kind=&id=` adds `contains` for the picker), `/{id}`, `/{id}/media`,
+`/{id}/items`, `/{id}/items/{kind}/{item_id}`. UI: a "我的分组" tab on the favorites page
+(`group=collection`), the `/collections/:id` page, and `CollectionPicker` ("加入分组") in the
+player and the image viewer; the player's `?coll=` playlist mirrors `?fav=`.
+
 `channels.video_count` / `photo_count` are what the list endpoints report as totals, not a live
 `COUNT(*)`: on a million-row channel counting twice per first page costs hundreds of milliseconds
 to render a number that only changes when a sync finishes. `MarkChannelIndexed` recomputes them
