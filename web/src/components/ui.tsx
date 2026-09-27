@@ -19,7 +19,7 @@ export function cx(...parts: (string | false | null | undefined)[]) {
 // underneath it.
 export function BackBar({ to, children }: { to: string; children: ReactNode }) {
   return (
-    <div className="sticky top-16 z-10 -mx-4 -mt-4 border-b border-gray-200 bg-gray-50/95 px-4 py-2.5 backdrop-blur md:-mx-6 md:-mt-6 md:px-6 dark:border-gray-800 dark:bg-gray-900/95">
+    <div data-backbar className="sticky top-16 z-10 -mx-4 -mt-4 border-b border-gray-200 bg-gray-50/95 px-4 py-2.5 backdrop-blur md:-mx-6 md:-mt-6 md:px-6 dark:border-gray-800 dark:bg-gray-900/95">
       <Link
         to={to}
         className="inline-flex max-w-full items-center gap-1 text-theme-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"

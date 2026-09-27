@@ -1,13 +1,13 @@
-import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { keepPreviousData, useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import mpegts from "mpegts.js";
 
 import { api, Channel, Collection, MediaCursor, MediaItem, MediaPage, Video } from "../api/client";
 import { ChevronLeftIcon, ChevronRightIcon, PlayIcon, StarIcon } from "../components/icons";
-import { LoadingState, Spinner, cx } from "../components/ui";
+import { BackBar, LoadingState, Spinner, cx } from "../components/ui";
 import { CollectionPicker } from "../components/CollectionPicker";
 import { useFavoriteState, useToggleFavorite } from "../favState";
+import { attachStream } from "../playback";
 
 interface VideoResp { video: Video; favorite: boolean }
 
@@ -202,7 +202,6 @@ export function Player() {
   const [streamDiag, setStreamDiag] = useState<string | null>(null);
   const [containerHint, setContainerHint] = useState<string>("");
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const flvPlayerRef = useRef<mpegts.Player | null>(null);
   const sidebarRef = useRef<HTMLDivElement | null>(null);
 
   // Stable string of the search params; used both as react-query cache key
@@ -211,7 +210,7 @@ export function Player() {
 
   const [endedAtPageEnd, setEndedAtPageEnd] = useState(false);
   // The current FLV/TS has no keyframe index, so it can only seek inside what's
-  // already buffered (see the mpegts.js setup below).
+  // already buffered (see attachStream in playback.ts).
   const [seekLimited, setSeekLimited] = useState(false);
 
   useEffect(() => {
@@ -232,8 +231,11 @@ export function Player() {
   useEffect(() => {
     const el = playerRef.current;
     if (!el) return;
+    // Clear both sticky bars: the app header and the pinned "返回…" bar.
     const header = document.querySelector("header");
-    const offset = (header?.getBoundingClientRect().height ?? 0) + 12;
+    const backbar = document.querySelector("[data-backbar]");
+    const offset =
+      (header?.getBoundingClientRect().height ?? 0) + (backbar?.getBoundingClientRect().height ?? 0) + 12;
     const top = el.getBoundingClientRect().top;
     if (top < offset - 1 || top > window.innerHeight * 0.4) {
       window.scrollTo({ top: Math.max(0, window.scrollY + top - offset) });
@@ -409,103 +411,21 @@ export function Player() {
   // pulling another 500 rows.
   const atLoadedEnd = currentIdx >= 0 && currentIdx === list.length - 1 && !!playlist.hasNextPage;
 
-  // Container detection + player setup
+  // Container detection + player setup (FLV/TS via mpegts.js, else native).
   useEffect(() => {
     const video = videoRef.current;
     const url = meta.data?.video.stream_url;
     if (!video || !url) return;
-
-    let cancelled = false;
     setMediaErr(null);
     setStreamDiag(null);
-
-    (async () => {
-      let kind: "flv" | "mpegts" | "native" = "native";
-      let hint = "";
-      try {
-        const r = await fetch(url, {
-          headers: { Range: "bytes=0-15" },
-          credentials: "include",
-        });
-        if (r.ok) {
-          const ab = await r.arrayBuffer();
-          const b = new Uint8Array(ab);
-          if (b.length >= 3 && b[0] === 0x46 && b[1] === 0x4c && b[2] === 0x56) {
-            kind = "flv";
-            hint = "FLV — mpegts.js";
-          } else if (b.length >= 8 && b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70) {
-            hint = "MP4 (ftyp)";
-          } else if (b.length >= 1 && b[0] === 0x47) {
-            // MPEG-TS sync byte (0x47) at offset 0 — naked .ts stream.
-            kind = "mpegts";
-            hint = "MPEG-TS — mpegts.js";
-          } else {
-            hint = "未识别容器,试试 native";
-          }
-        }
-      } catch {
-        // probe failed
-      }
-      if (cancelled) return;
-      setContainerHint(hint);
-
-      if (kind === "flv" || kind === "mpegts") {
-        if (!mpegts.getFeatureList().mseLivePlayback) {
-          setMediaErr("浏览器不支持 MSE — 该视频(FLV/TS)无法播放");
-          return;
-        }
-        const player = mpegts.createPlayer(
-          {
-            type: kind, // "flv" | "mpegts"
-            url,
-            isLive: false,
-            cors: true,
-            withCredentials: true,
-          },
-          {
-            // Default is false: a seek into an unbuffered range then lands on
-            // the nearest keyframe, not the second the user dragged to — up to
-            // a whole GOP off, several seconds on typical live recordings. With
-            // it on, mpegts.js decodes from that keyframe and drops frames up to
-            // the exact target.
-            accurateSeek: true,
-          },
-        );
-        // mpegts.js can only seek outside the buffered range when the file
-        // carries a keyframe index (FLV onMetaData.keyframes; TS never has
-        // one) — MediaInfo.isSeekable() is literally hasKeyframesIndex, and
-        // without it the transmuxer's seek() returns without fetching anything.
-        // That's a property of the file, not something config can fix, so tell
-        // the user why a far drag won't take.
-        player.on(mpegts.Events.MEDIA_INFO, (info: { hasKeyframesIndex?: boolean | null }) => {
-          if (!cancelled && info?.hasKeyframesIndex !== true) setSeekLimited(true);
-        });
-        player.attachMediaElement(video);
-        player.on(mpegts.Events.ERROR, (errType, errDetail, errInfo) => {
-          setMediaErr(`mpegts ${errType}: ${errDetail}`);
-          setStreamDiag(JSON.stringify(errInfo));
-        });
-        player.load();
-        flvPlayerRef.current = player;
-        try { await player.play(); } catch { /* autoplay block */ }
-      } else {
-        video.src = url;
-        try { await video.play(); } catch { /* autoplay block */ }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      if (flvPlayerRef.current) {
-        try { flvPlayerRef.current.destroy(); } catch { /* noop */ }
-        flvPlayerRef.current = null;
-      }
-      try {
-        video.pause();
-        video.removeAttribute("src");
-        video.load();
-      } catch { /* noop */ }
-    };
+    return attachStream(video, url, {
+      onHint: setContainerHint,
+      onError: (msg, diag) => {
+        setMediaErr(msg);
+        if (diag) setStreamDiag(diag);
+      },
+      onSeekLimited: () => setSeekLimited(true),
+    });
   }, [meta.data?.video.stream_url]);
 
   // Shared with the grid's tile stars, so a list cached behind the player
@@ -551,7 +471,8 @@ export function Player() {
 
   return (
     <div className="p-4 md:p-6">
-      <div className={cx("grid gap-5", hasPlaylist && "xl:grid-cols-[minmax(0,1fr)_360px]")}>
+      <BackBar to={back.to}>{backLabel}</BackBar>
+      <div className={cx("mt-5 grid gap-5", hasPlaylist && "xl:grid-cols-[minmax(0,1fr)_360px]")}>
         <div className="min-w-0 space-y-5">
           {/* video stage — media keeps its own near-black backdrop inside the
               card frame; the chrome around it stays on the neutral canvas. */}
@@ -694,13 +615,6 @@ export function Player() {
                     无关键帧索引 · 只能在已缓冲范围内拖动
                   </span>
                 )}
-                <Link
-                  to={back.to}
-                  className="ml-auto inline-flex max-w-full items-center gap-1 truncate hover:text-gray-700 dark:hover:text-gray-200"
-                >
-                  <ChevronLeftIcon className="size-4 shrink-0" />
-                  <span className="truncate">{backLabel}</span>
-                </Link>
               </div>
             </div>
           )}
@@ -708,7 +622,7 @@ export function Player() {
 
         {/* playlist sidebar */}
         {hasPlaylist && (
-          <aside className="card flex max-h-[80vh] min-h-0 flex-col overflow-hidden xl:sticky xl:top-[84px]">
+          <aside className="card flex max-h-[80vh] min-h-0 flex-col overflow-hidden xl:sticky xl:top-[124px] xl:max-h-[calc(100vh-144px)]">
             <div className="flex shrink-0 items-center gap-2 border-b border-gray-200 px-4 py-3 dark:border-gray-800">
               <span className="text-theme-sm font-medium text-gray-800 dark:text-white/90">
                 播放列表
