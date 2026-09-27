@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 
 import { api, MediaItem } from "../api/client";
 import { ChevronLeftIcon, ChevronRightIcon, CloseIcon, StarIcon } from "../components/icons";
 import { CollectionPicker } from "./CollectionPicker";
+import { useFavoriteState, useToggleFavorite } from "../favState";
 import { Spinner, cx } from "./ui";
 import { fmtSize } from "./MediaGrid";
 
@@ -37,7 +38,6 @@ export function Lightbox({
   onLoadMore?: () => void;
 }) {
   const item = items[index];
-  const qc = useQueryClient();
   const [loaded, setLoaded] = useState(false);
   // Set after the user clicks "加载下一页"; when that page lands we step to the
   // first image it added (if any). Nothing here fetches without a click.
@@ -51,19 +51,10 @@ export function Lightbox({
     queryFn: () => api.get(`/api/photos/${item.id}`),
     enabled: !!item,
   });
-  const favorite = !!meta.data?.favorite;
-
-  const fav = useMutation({
-    mutationFn: async () => {
-      if (favorite) return api.del(`/api/favorites/photo/${item.id}`);
-      return api.post("/api/favorites/", { kind: "photo", id: item.id });
-    },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["photo", item.id] });
-      qc.invalidateQueries({ queryKey: ["favorites"] });
-    },
-    onError: (e: Error) => alert(`收藏操作失败: ${e.message}`),
-  });
+  // Before the detail lands, the list row already knows; after a toggle (here
+  // or on the tile) the shared state wins.
+  const favorite = useFavoriteState("photo", item?.id, meta.data ? !!meta.data.favorite : !!item?.favorite);
+  const fav = useToggleFavorite();
 
   const atEnd = index >= items.length - 1;
   const canLoadMore = hasMore && !!onLoadMore;
@@ -187,8 +178,8 @@ export function Lightbox({
         <CollectionPicker kind="photo" id={item.id} variant="overlay" />
         <button
           type="button"
-          onClick={() => fav.mutate()}
-          disabled={fav.isPending || meta.isLoading}
+          onClick={() => fav.mutate({ kind: "photo", id: item.id, fav: favorite })}
+          disabled={fav.isPending}
           title={favorite ? "取消收藏" : "收藏"}
           className={cx(
             "flex size-10 items-center justify-center rounded-full transition-colors",

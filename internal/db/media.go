@@ -21,6 +21,9 @@ type MediaItem struct {
 	Kind  string
 	Video *Video
 	Photo *Photo
+	// Favorite: the listing user has favorited this row, so a grid tile can
+	// show and toggle its star without opening the item.
+	Favorite bool
 }
 
 func (m MediaItem) id() int64 {
@@ -197,7 +200,66 @@ func (d *DB) ListMedia(ctx context.Context, opt ListMediaOpts) ([]MediaItem, Med
 			next.PhotoID = it.id()
 		}
 	}
+	if err := d.markFavorites(ctx, opt.UserID, items, opt.FavOnly); err != nil {
+		return nil, next, false, err
+	}
 	return items, next, hasMore, nil
+}
+
+// markFavorites sets Favorite on a page of items: one primary-key lookup per
+// kind for the page's ids, rather than a join in every list query. A favorites
+// listing needs no lookup at all.
+func (d *DB) markFavorites(ctx context.Context, userID int64, items []MediaItem, favOnly bool) error {
+	if favOnly {
+		for i := range items {
+			items[i].Favorite = true
+		}
+		return nil
+	}
+	var vids, pids []int64
+	for _, it := range items {
+		if it.Kind == MediaKindVideo {
+			vids = append(vids, it.id())
+		} else {
+			pids = append(pids, it.id())
+		}
+	}
+	favV, err := d.favoriteIDs(ctx, `SELECT video_id FROM favorites WHERE user_id=$1 AND video_id = ANY($2)`, userID, vids)
+	if err != nil {
+		return err
+	}
+	favP, err := d.favoriteIDs(ctx, `SELECT photo_id FROM photo_favorites WHERE user_id=$1 AND photo_id = ANY($2)`, userID, pids)
+	if err != nil {
+		return err
+	}
+	for i, it := range items {
+		if it.Kind == MediaKindVideo {
+			items[i].Favorite = favV[it.id()]
+		} else {
+			items[i].Favorite = favP[it.id()]
+		}
+	}
+	return nil
+}
+
+func (d *DB) favoriteIDs(ctx context.Context, q string, userID int64, ids []int64) (map[int64]bool, error) {
+	out := map[int64]bool{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := d.Query(ctx, q, userID, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
 }
 
 // sortMedia orders the merged page exactly like the per-table ORDER BY clauses

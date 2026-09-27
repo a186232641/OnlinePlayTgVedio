@@ -109,6 +109,7 @@ export interface MediaItem {
   height: number;
   text: string;
   favorited_at?: string; // favorites listings only
+  favorite: boolean; // the user has favorited it (drives the tile's star)
   url: string;       // stream URL (video) / full image URL (photo)
   thumb_url: string;
 }

@@ -442,6 +442,26 @@ func TestIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// --- favorite flag on ordinary listings ---------------------------------
+	// Exactly vid + pid are favorited now; a plain listing marks those two.
+	items, _, _, err = d.ListMedia(ctx, ListMediaOpts{UserID: uid, Limit: 500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	marked := 0
+	for _, it := range items {
+		want := (it.Kind == MediaKindVideo && it.id() == vid) || (it.Kind == MediaKindPhoto && it.id() == pid)
+		if it.Favorite != want {
+			t.Fatalf("%s#%d Favorite = %v, want %v", it.Kind, it.id(), it.Favorite, want)
+		}
+		if it.Favorite {
+			marked++
+		}
+	}
+	if marked != 2 {
+		t.Fatalf("marked %d favorites, want 2", marked)
+	}
+
 	// --- collections ------------------------------------------------------
 	// Every row of the topic goes into one collection with the same tied
 	// timestamps as the favorites walk above, so the expected order is the

@@ -1,5 +1,5 @@
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import mpegts from "mpegts.js";
 
@@ -7,6 +7,7 @@ import { api, Channel, Collection, MediaCursor, MediaItem, MediaPage, Video } fr
 import { ChevronLeftIcon, ChevronRightIcon, PlayIcon, StarIcon } from "../components/icons";
 import { LoadingState, Spinner, cx } from "../components/ui";
 import { CollectionPicker } from "../components/CollectionPicker";
+import { useFavoriteState, useToggleFavorite } from "../favState";
 
 interface VideoResp { video: Video; favorite: boolean }
 
@@ -181,7 +182,8 @@ type PlaylistParam =
   | { kind: "before"; id: number; key: string };
 
 function videoToItem(v: Video): MediaItem {
-  return { ...v, kind: "video", url: v.stream_url, thumb_url: `/api/videos/${v.id}/thumb` };
+  // Playlist rows show no star, so `favorite` is never read from these.
+  return { ...v, kind: "video", url: v.stream_url, thumb_url: `/api/videos/${v.id}/thumb`, favorite: false };
 }
 
 // withCursor appends the merged-list keyset cursor. Only the video half matters
@@ -196,7 +198,6 @@ export function Player() {
   const { id } = useParams();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const qc = useQueryClient();
   const [mediaErr, setMediaErr] = useState<string | null>(null);
   const [streamDiag, setStreamDiag] = useState<string | null>(null);
   const [containerHint, setContainerHint] = useState<string>("");
@@ -507,17 +508,9 @@ export function Player() {
     };
   }, [meta.data?.video.stream_url]);
 
-  const fav = useMutation({
-    mutationFn: async () => {
-      if (!meta.data) return;
-      if (meta.data.favorite) {
-        await api.del(`/api/favorites/${meta.data.video.id}`);
-      } else {
-        await api.post(`/api/favorites/`, { video_id: meta.data.video.id });
-      }
-    },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["video", id] }),
-  });
+  // Shared with the grid's tile stars, so a list cached behind the player
+  // shows the new state on return.
+  const fav = useToggleFavorite();
 
   const goToVideo = (vid: number) => {
     const params = searchParams.toString();
@@ -554,7 +547,7 @@ export function Player() {
           : "返回我的频道";
   const showLoading = meta.isLoading && !meta.data;
   const showNotFound = !meta.isLoading && !meta.data;
-  const isFav = !!meta.data?.favorite;
+  const isFav = useFavoriteState("video", meta.data?.video.id, !!meta.data?.favorite);
 
   return (
     <div className="p-4 md:p-6">
@@ -650,7 +643,7 @@ export function Player() {
 
                 <div className="flex shrink-0 flex-col gap-2">
                   <button
-                    onClick={() => fav.mutate()}
+                    onClick={() => v && fav.mutate({ kind: "video", id: v.id, fav: isFav })}
                     disabled={fav.isPending}
                     className={cx(
                       "btn",

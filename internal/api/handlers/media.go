@@ -34,6 +34,8 @@ type mediaDTO struct {
 	Text            string `json:"text"`
 	// FavoritedAt is set only in favorites listings.
 	FavoritedAt string `json:"favorited_at,omitempty"`
+	// Favorite: the user has favorited this item (drives the tile's star).
+	Favorite bool `json:"favorite"`
 	// URL plays the video / loads the full image; ThumbURL is the grid tile.
 	URL      string `json:"url"`
 	ThumbURL string `json:"thumb_url"`
@@ -99,6 +101,7 @@ func mediaToDTO(m db.MediaItem) mediaDTO {
 	if fav != nil {
 		d.FavoritedAt = fav.Format(time.RFC3339)
 	}
+	d.Favorite = m.Favorite
 	return d
 }
 

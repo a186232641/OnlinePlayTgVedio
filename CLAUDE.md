@@ -231,6 +231,13 @@ across its topics (`TopicStats` → `topic_video_count`/`topic_photo_count` on t
 merely having topics: discovery enumerates the topics of every forum the account has joined,
 synced or not, so a "has topics" check lists groups nobody ever pulled a message from.
 
+**Tiles favorite in place.** Every merged listing carries `favorite` per item (`markFavorites`:
+one primary-key lookup per kind for the page's ids, not a join in each list query), and
+`MediaGrid`'s `FavStar` toggles it — a sibling of the tile link, like the source links. Toggles
+from the tile, `Lightbox` and `Player` all go through `favState.ts` (`useToggleFavorite` /
+`useFavoriteState`), a session-wide override map, so lists kept in cache for scroll restoration
+show the new state without being refetched.
+
 Favorites and media search span every channel and topic, so their responses carry a `sources` side map
 (channel id → title, plus the parent group for a topic; `ChannelSources`) and the grid renders a
 "来自 群组 › 话题" line with links to both levels. It's a per-page map rather than fields on each

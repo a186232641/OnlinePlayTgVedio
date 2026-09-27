@@ -2,8 +2,9 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import { MediaItem, MediaSource } from "../api/client";
-import { ClockIcon, ImageIcon, PlayIcon } from "./icons";
-import { EmptyState } from "./ui";
+import { useFavoriteState, useToggleFavorite } from "../favState";
+import { ClockIcon, ImageIcon, PlayIcon, StarIcon } from "./icons";
+import { EmptyState, cx } from "./ui";
 
 export function fmtDuration(s: number) {
   if (!s) return "";
@@ -49,6 +50,33 @@ function Thumb({ item }: { item: MediaItem }) {
       onError={() => setFailed(true)}
       className="size-full bg-gray-100 object-cover transition-transform duration-200 group-hover:scale-[1.03] dark:bg-white/[0.04]"
     />
+  );
+}
+
+// FavStar favorites a tile in place, without opening it. It is a sibling of
+// the tile's link/button (positioned over the thumbnail), never inside it — an
+// interactive element nested in another is invalid and its click gets lost.
+// Where the device can hover it appears on hover (or when set); on touch it is
+// always shown, since there is no hover to reveal it.
+function FavStar({ item }: { item: MediaItem }) {
+  const fav = useFavoriteState(item.kind, item.id, item.favorite);
+  const toggle = useToggleFavorite();
+  return (
+    <button
+      type="button"
+      onClick={() => toggle.mutate({ kind: item.kind, id: item.id, fav })}
+      disabled={toggle.isPending}
+      title={fav ? "取消收藏" : "收藏"}
+      aria-pressed={fav}
+      className={cx(
+        "absolute right-2 top-2 z-10 flex size-8 items-center justify-center rounded-full shadow-theme-xs backdrop-blur-sm transition-[opacity,background-color] focus-visible:opacity-100 disabled:opacity-60",
+        fav
+          ? "bg-warning-500 text-white"
+          : "bg-black/45 text-white hover:bg-black/65 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover/card:opacity-100",
+      )}
+    >
+      <StarIcon filled={fav} className="size-4" />
+    </button>
   );
 }
 
@@ -159,9 +187,10 @@ export function MediaGrid({
         return (
           <div
             key={key}
-            className="card flex flex-col overflow-hidden p-0 transition-colors hover:border-brand-300 dark:hover:border-brand-500/40"
+            className="card group/card relative flex flex-col overflow-hidden p-0 transition-colors hover:border-brand-300 dark:hover:border-brand-500/40"
           >
             {body}
+            <FavStar item={m} />
             {src && <SourceLine src={src} />}
           </div>
         );
