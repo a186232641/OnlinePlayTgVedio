@@ -479,6 +479,57 @@ func (d *DB) CountTopicsMatching(ctx context.Context, parentID, userID int64, q 
 	return n, err
 }
 
+// topicSearchWhere scopes SearchTopics/CountTopicSearch: the user's topic rows
+// on a live (non-revoked) session, optionally matching q in the title. $1 =
+// user id, $2 = the topic dialog kind, $3 = the ILIKE pattern when q is set.
+func topicSearchWhere(userID int64, q string) (string, []any) {
+	where := `
+        FROM channels c
+        JOIN tg_sessions s ON s.id = c.tg_session_id
+        WHERE c.user_id=$1 AND c.dialog_kind=$2 AND s.status <> 'revoked'`
+	args := []any{userID, DialogKindTopic}
+	if q != "" {
+		args = append(args, "%"+q+"%")
+		where += ` AND c.title ILIKE $3`
+	}
+	return where, args
+}
+
+// SearchTopics finds topics by title across every forum group the user has —
+// ListTopicsPage is the same search within one group. Topics holding the most
+// media come first, like the per-group list. Same limit/offset paging.
+func (d *DB) SearchTopics(ctx context.Context, userID int64, q string, limit, offset int) ([]Channel, bool, error) {
+	where, args := topicSearchWhere(userID, q)
+	sql := `SELECT ` + channelCols + where + ` ORDER BY (c.video_count + c.photo_count) DESC, c.id DESC`
+	sql, args = appendPage(sql, args, limit, offset)
+	rows, err := d.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	var out []Channel
+	for rows.Next() {
+		c, err := scanChannel(rows)
+		if err != nil {
+			return nil, false, err
+		}
+		out = append(out, *c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	out, more := trimPage(out, limit)
+	return out, more, nil
+}
+
+// CountTopicSearch is the first-page total for SearchTopics.
+func (d *DB) CountTopicSearch(ctx context.Context, userID int64, q string) (int64, error) {
+	where, args := topicSearchWhere(userID, q)
+	var n int64
+	err := d.QueryRow(ctx, `SELECT count(*)`+where, args...).Scan(&n)
+	return n, err
+}
+
 // CountChannels is the first-page total for a filtered ListChannels.
 func (d *DB) CountChannels(ctx context.Context, opt ListChannelsOpts) (int64, error) {
 	sql := `

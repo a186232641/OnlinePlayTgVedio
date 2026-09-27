@@ -108,6 +108,16 @@ func TestIntegration(t *testing.T) {
 	if n, err := d.CountTopics(ctx, forumID, uid); err != nil || n != 1 {
 		t.Fatalf("CountTopics = %d, %v", n, err)
 	}
+	// Cross-group topic search: by title, never the group row itself.
+	if hits, more, err := d.SearchTopics(ctx, uid, "改名", 10, 0); err != nil || more || len(hits) != 1 || hits[0].ID != topicID {
+		t.Fatalf("SearchTopics(改名) = %+v more=%v err=%v", hits, more, err)
+	}
+	if hits, _, err := d.SearchTopics(ctx, uid, "群组", 10, 0); err != nil || len(hits) != 0 {
+		t.Fatalf("SearchTopics should not match the group: %+v, %v", hits, err)
+	}
+	if n, err := d.CountTopicSearch(ctx, uid, ""); err != nil || n != 1 {
+		t.Fatalf("CountTopicSearch = %d, %v", n, err)
+	}
 	stats, err := d.TopicStats(ctx, uid)
 	if err != nil || stats[forumID].Topics != 1 {
 		t.Fatalf("TopicStats = %v, %v", stats, err)

@@ -145,6 +145,49 @@ func (h *ChannelsHandlers) Topics(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, resp)
 }
 
+// topicHitDTO is a topic search result: the topic row plus its group's title,
+// since results span every forum group.
+type topicHitDTO struct {
+	channelDTO
+	ParentTitle string `json:"parent_title,omitempty"`
+}
+
+// SearchTopics finds topics by title across all of the user's forum groups.
+//
+// GET /api/topics?q=&limit=&offset=
+func (h *ChannelsHandlers) SearchTopics(w http.ResponseWriter, r *http.Request) {
+	uid, _ := web.UserIDFromContext(r.Context())
+	q, limit, offset := pageParams(r)
+	if limit <= 0 {
+		limit = 50 // never the unpaged "everything": a user can have thousands of topics
+	}
+	topics, more, err := h.DB.SearchTopics(r.Context(), uid, q, limit, offset)
+	if err != nil {
+		httpx.WriteError(w, err)
+		return
+	}
+	ids := make([]int64, 0, len(topics))
+	for _, t := range topics {
+		ids = append(ids, t.ID)
+	}
+	srcs, err := h.DB.ChannelSources(r.Context(), uid, ids)
+	if err != nil {
+		httpx.WriteError(w, err)
+		return
+	}
+	out := make([]topicHitDTO, 0, len(topics))
+	for _, t := range topics {
+		out = append(out, topicHitDTO{channelDTO: channelToDTO(t), ParentTitle: srcs[t.ID].ParentTitle})
+	}
+	resp := map[string]any{"topics": out, "has_more": more}
+	if offset == 0 {
+		if n, err := h.DB.CountTopicSearch(r.Context(), uid, q); err == nil {
+			resp["total"] = n
+		}
+	}
+	httpx.WriteJSON(w, http.StatusOK, resp)
+}
+
 // SyncStatuses returns the live sync state of several channels/topics at once.
 //
 // GET /api/channels/sync-status?ids=1,2,3

@@ -256,6 +256,12 @@ boundary mid-sync. `GET /channels/` **without** `limit` still returns everything
 and the search dropdown need the full list. The dialog-kind filter lives in SQL, not the handler,
 or paged results would come up short.
 
+**Topic search** (`GET /api/topics?q=`, `SearchTopics`) finds topics by title across every forum
+group — the per-group `/channels/{id}/topics?q=` is the same search inside one group. Same
+limit/offset paging (always paged; a user can have thousands of topics), most media first,
+revoked sessions excluded; each hit carries `parent_title`. The Search page's "搜话题" mode
+(`?mode=topic&q=`) renders it.
+
 **Live sync progress for a list is one batched poll**: `GET /channels/sync-status?ids=…`
 (`useSyncStatuses`), polling only while something reports running. Both earlier patterns hurt on
 a phone — re-fetching the whole list every 2s re-rendered every row, and a status query per row

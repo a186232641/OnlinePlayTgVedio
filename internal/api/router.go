@@ -101,6 +101,8 @@ func NewRouter(d Deps) http.Handler {
 				r.Post("/{id}/backfill", chH.Backfill)
 			})
 
+			r.Get("/topics", chH.SearchTopics)
+
 			r.Route("/media", func(r chi.Router) {
 				r.Get("/search", chH.MediaSearch)
 			})
