@@ -182,3 +182,10 @@
     @apply bg-gray-400 dark:bg-gray-600;
   }
 }
+
+/* Slideshow: the image-dwell progress bar fills over the dwell time
+   (Slideshow.tsx sets the duration inline). */
+@keyframes slideshow-progress {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}

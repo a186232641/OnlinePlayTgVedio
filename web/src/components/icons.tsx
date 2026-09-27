@@ -196,3 +196,10 @@ export const CheckIcon = (p: IconProps) => (
     <path d="M5 12.5l4.5 4.5L19 7.5" />
   </Icon>
 );
+
+export const PauseIcon = (p: IconProps) => (
+  <Icon {...p} fill="currentColor" stroke="none">
+    <rect x="7" y="5.5" width="3.5" height="13" rx="1" />
+    <rect x="13.5" y="5.5" width="3.5" height="13" rx="1" />
+  </Icon>
+);

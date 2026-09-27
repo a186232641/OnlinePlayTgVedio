@@ -276,6 +276,14 @@ button is the only way to load more, and autoplay stops at the last loaded video
 Don't reintroduce IntersectionObserver or prefetch loading. The viewer still preloads both
 neighbour images and supports horizontal swipe.
 
+**Playback setup lives in `src/playback.ts`** (`attachStream`): container sniffing and the
+mpegts.js-vs-native choice, shared by `Player` and `Slideshow`. The collection page's "播放" opens
+`Slideshow`: images and videos full screen in list order, manual ←/→/swipe, or auto mode
+(`IMAGE_DWELL_MS` = 2.5 s per image, a video advances on `ended`). Its timers are keyed on the
+current item, not re-armed per render (that would restart the dwell), and it passes
+`retryMuted` so a blocked autoplay plays muted instead of stalling auto mode. Like the viewer and
+the player, it stops at the last loaded item with a "加载下一页" button.
+
 **Seeking FLV/TS (mpegts.js).** Two library behaviours, both read from its source: `accurateSeek`
 defaults to false, so an unbuffered seek lands on the nearest keyframe rather than the target
 (we pass `{ accurateSeek: true }` — it's the `createPlayer` *second* argument, `Config`, not the
@@ -285,7 +293,9 @@ buffered range at all: the transmuxer's `seek()` returns without fetching. That 
 the file; the player shows a badge when `MEDIA_INFO` reports no index. MP4 goes through the native
 `<video>` path and seeks precisely.
 
-**Player positioning.** Nothing in the app resets scroll on navigation, so `Player` scrolls the
+**Player positioning.** "返回…" is a `BackBar` at the top-left (sticky, `data-backbar`); the
+scroll-to-player offset measures both it and the header, and the playlist sidebar's sticky top
+clears both. Nothing in the app resets scroll on navigation, so `Player` scrolls the
 window to the player on each video change *if it's out of view* (a tile far down a grid, or the
 playlist that sits below the player on a phone). The playlist's "center the current row" effect
 re-runs until it has actually found the row for this video — on open the playlist is usually still
