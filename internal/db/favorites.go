@@ -65,13 +65,26 @@ func (d *DB) IsPhotoFavorite(ctx context.Context, userID, photoID int64) (bool, 
 	return true, nil
 }
 
-// --- Favorites grouped by source ---
+// --- Favorites grouped ---
 
-// FavoriteSource is one channel or topic row the user has favorited media
-// from: how many of each kind, when the latest was added, and that latest item
-// (the cover of the group's card).
-type FavoriteSource struct {
-	ChannelID       int64
+// What FavoriteGroups groups by.
+const (
+	// FavGroupBySource: the channel row an item belongs to — for a forum group
+	// that is the topic, since media is stored on the topic row.
+	FavGroupBySource = "source"
+	// FavGroupByStreamer: videos.streamer, the "{streamer}-YYYY-MM-DD" filename
+	// prefix (migration 0004). Videos only — images have no such name — and
+	// global rather than per channel: one streamer's recordings often land in
+	// several channels. Unmatched filenames form the "" bucket.
+	FavGroupByStreamer = "streamer"
+)
+
+// FavoriteGroup is one bucket of the user's favorites: how many of each kind,
+// when the latest was added, and that latest item (the cover of its card).
+type FavoriteGroup struct {
+	// Key is the channel id (as text) for FavGroupBySource, the streamer name
+	// for FavGroupByStreamer ("" = filenames without a streamer).
+	Key             string
 	Videos          int64
 	Photos          int64
 	LastFavoritedAt time.Time
@@ -79,55 +92,62 @@ type FavoriteSource struct {
 	CoverID         int64
 }
 
-// FavoriteSources groups the user's favorites (both tables) by the channel row
-// they came from — for a forum group that is the topic, since media is stored
-// on the topic row. Newest-favorited group first. kind ("" = both) restricts
-// which favorites count.
+// FavoriteGroups buckets the user's favorites (both tables) by `by`,
+// newest-favorited bucket first. kind ("" = both) restricts which favorites
+// count; grouping by streamer implies videos.
 //
-// No pagination: the result is one row per distinct source, which is bounded
-// by how many channels/topics the user has favorited anything from.
-func (d *DB) FavoriteSources(ctx context.Context, userID int64, kind string) ([]FavoriteSource, error) {
+// No pagination: the result is one row per distinct bucket, bounded by how
+// many channels/streamers the user has favorited anything from.
+func (d *DB) FavoriteGroups(ctx context.Context, userID int64, by, kind string) ([]FavoriteGroup, error) {
+	videoKey, photoKey := "v.channel_id::text", "p.channel_id::text"
+	switch by {
+	case FavGroupBySource:
+	case FavGroupByStreamer:
+		videoKey, kind = "COALESCE(v.streamer, '')", MediaKindVideo
+	default:
+		return nil, errors.New("unknown favorites grouping: " + by)
+	}
 	var parts []string
 	if kind != MediaKindPhoto {
 		parts = append(parts, `
-            SELECT v.channel_id, 'video' AS kind, v.id, f.created_at
+            SELECT `+videoKey+` AS gkey, 'video' AS kind, v.id, f.created_at
             FROM favorites f JOIN videos v ON v.id = f.video_id
             WHERE f.user_id = $1`)
 	}
 	if kind != MediaKindVideo {
 		parts = append(parts, `
-            SELECT p.channel_id, 'photo' AS kind, p.id, f.created_at
+            SELECT `+photoKey+` AS gkey, 'photo' AS kind, p.id, f.created_at
             FROM photo_favorites f JOIN photos p ON p.id = f.photo_id
             WHERE f.user_id = $1`)
 	}
 	rows, err := d.Query(ctx, `
         WITH fav AS (`+strings.Join(parts, " UNION ALL ")+`),
         agg AS (
-            SELECT channel_id,
+            SELECT gkey,
                    COUNT(*) FILTER (WHERE kind = 'video') AS videos,
                    COUNT(*) FILTER (WHERE kind = 'photo') AS photos,
                    MAX(created_at) AS last_at
-            FROM fav GROUP BY channel_id
+            FROM fav GROUP BY gkey
         ),
         cover AS (
-            SELECT DISTINCT ON (channel_id) channel_id, kind, id
-            FROM fav ORDER BY channel_id, created_at DESC, kind, id DESC
+            SELECT DISTINCT ON (gkey) gkey, kind, id
+            FROM fav ORDER BY gkey, created_at DESC, kind, id DESC
         )
-        SELECT a.channel_id, a.videos, a.photos, a.last_at, c.kind, c.id
-        FROM agg a JOIN cover c ON c.channel_id = a.channel_id
-        ORDER BY a.last_at DESC, a.channel_id DESC
+        SELECT a.gkey, a.videos, a.photos, a.last_at, c.kind, c.id
+        FROM agg a JOIN cover c ON c.gkey = a.gkey
+        ORDER BY a.last_at DESC, a.gkey
     `, userID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []FavoriteSource
+	var out []FavoriteGroup
 	for rows.Next() {
-		var s FavoriteSource
-		if err := rows.Scan(&s.ChannelID, &s.Videos, &s.Photos, &s.LastFavoritedAt, &s.CoverKind, &s.CoverID); err != nil {
+		var g FavoriteGroup
+		if err := rows.Scan(&g.Key, &g.Videos, &g.Photos, &g.LastFavoritedAt, &g.CoverKind, &g.CoverID); err != nil {
 			return nil, err
 		}
-		out = append(out, s)
+		out = append(out, g)
 	}
 	return out, rows.Err()
 }

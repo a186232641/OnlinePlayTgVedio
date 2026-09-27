@@ -48,7 +48,8 @@ func (f favReq) target() (string, int64) {
 // List returns the user's favorites — videos and images merged, newest first.
 // It accepts the same file_name / date_from / date_to / order / kind filters as
 // the media search so the favorites page can search within favorites, plus
-// channel_id to open one group of the by-source view.
+// channel_id / streamer to open one card of a grouped view (streamer present,
+// even empty = the no-streamer bucket, filters on it — as in ChannelMedia).
 func (h *FavoritesHandlers) List(w http.ResponseWriter, r *http.Request) {
 	uid, _ := web.UserIDFromContext(r.Context())
 	qv := r.URL.Query()
@@ -67,6 +68,9 @@ func (h *FavoritesHandlers) List(w http.ResponseWriter, r *http.Request) {
 		OrderBy:   qv.Get("order"),
 		Limit:     limit,
 		Cursor:    mediaCursorFromQuery(r),
+
+		StreamerFilter: qv.Has("streamer"),
+		Streamer:       qv.Get("streamer"),
 	})
 	if err != nil {
 		httpx.WriteError(w, err)
@@ -82,58 +86,76 @@ func (h *FavoritesHandlers) List(w http.ResponseWriter, r *http.Request) {
 	writeMediaPage(w, items, next, hasMore, map[string]any{"sources": sources})
 }
 
-// favSourceDTO is one card of the by-source favorites view: a channel or
-// topic, how much of it is favorited, and the latest favorite as its cover.
-type favSourceDTO struct {
-	Source          sourceDTO `json:"source"`
-	Videos          int64     `json:"videos"`
-	Photos          int64     `json:"photos"`
-	LastFavoritedAt string    `json:"last_favorited_at"`
-	CoverKind       string    `json:"cover_kind"`
-	CoverThumbURL   string    `json:"cover_thumb_url"`
+// favGroupDTO is one card of a grouped favorites view. `by` tags what the
+// group is, so the UI knows how to title it and which filter opens it:
+// source → ?channel_id=<key>, streamer → ?streamer=<key>.
+type favGroupDTO struct {
+	By              string     `json:"by"`
+	Key             string     `json:"key"`
+	Source          *sourceDTO `json:"source,omitempty"` // by=source only
+	Videos          int64      `json:"videos"`
+	Photos          int64      `json:"photos"`
+	LastFavoritedAt string     `json:"last_favorited_at"`
+	CoverKind       string     `json:"cover_kind"`
+	CoverThumbURL   string     `json:"cover_thumb_url"`
 }
 
-// Sources groups the user's favorites by the channel or topic they came from,
-// so a topic with many favorited items shows up once rather than item by item.
+// Groups buckets the user's favorites so a topic (or streamer) with many
+// favorited items shows up once rather than item by item.
 //
-// GET /api/favorites/sources?kind=
-func (h *FavoritesHandlers) Sources(w http.ResponseWriter, r *http.Request) {
+// GET /api/favorites/groups?by=source|streamer&kind=
+func (h *FavoritesHandlers) Groups(w http.ResponseWriter, r *http.Request) {
 	uid, _ := web.UserIDFromContext(r.Context())
-	groups, err := h.DB.FavoriteSources(r.Context(), uid, normalizeKind(r.URL.Query().Get("kind")))
+	qv := r.URL.Query()
+	by := qv.Get("by")
+	if by != db.FavGroupBySource && by != db.FavGroupByStreamer {
+		httpx.WriteError(w, httpx.Errorf(http.StatusBadRequest, "bad_group", "by must be source or streamer"))
+		return
+	}
+	groups, err := h.DB.FavoriteGroups(r.Context(), uid, by, normalizeKind(qv.Get("kind")))
 	if err != nil {
 		httpx.WriteError(w, err)
 		return
 	}
-	ids := make([]int64, 0, len(groups))
-	for _, g := range groups {
-		ids = append(ids, g.ChannelID)
-	}
-	srcs, err := h.DB.ChannelSources(r.Context(), uid, ids)
-	if err != nil {
-		httpx.WriteError(w, err)
-		return
-	}
-	out := make([]favSourceDTO, 0, len(groups))
-	for _, g := range groups {
-		s, ok := srcs[g.ChannelID]
-		if !ok {
-			continue // channel row gone or not the user's
+	var srcs map[int64]db.ChannelSource
+	if by == db.FavGroupBySource {
+		ids := make([]int64, 0, len(groups))
+		for _, g := range groups {
+			id, _ := strconv.ParseInt(g.Key, 10, 64)
+			ids = append(ids, id)
 		}
+		if srcs, err = h.DB.ChannelSources(r.Context(), uid, ids); err != nil {
+			httpx.WriteError(w, err)
+			return
+		}
+	}
+	out := make([]favGroupDTO, 0, len(groups))
+	for _, g := range groups {
 		thumb := "/api/videos/"
 		if g.CoverKind == db.MediaKindPhoto {
 			thumb = "/api/photos/"
 		}
-		out = append(out, favSourceDTO{
-			Source: sourceDTO{
-				ID: s.ID, Title: s.Title, DialogKind: s.DialogKind,
-				ParentChannelID: s.ParentID, ParentTitle: s.ParentTitle,
-			},
+		d := favGroupDTO{
+			By:              by,
+			Key:             g.Key,
 			Videos:          g.Videos,
 			Photos:          g.Photos,
 			LastFavoritedAt: g.LastFavoritedAt.Format("2006-01-02T15:04:05Z07:00"),
 			CoverKind:       g.CoverKind,
 			CoverThumbURL:   thumb + strconv.FormatInt(g.CoverID, 10) + "/thumb",
-		})
+		}
+		if by == db.FavGroupBySource {
+			id, _ := strconv.ParseInt(g.Key, 10, 64)
+			s, ok := srcs[id]
+			if !ok {
+				continue // channel row gone or not the user's
+			}
+			d.Source = &sourceDTO{
+				ID: s.ID, Title: s.Title, DialogKind: s.DialogKind,
+				ParentChannelID: s.ParentID, ParentTitle: s.ParentTitle,
+			}
+		}
+		out = append(out, d)
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"items": out})
 }

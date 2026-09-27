@@ -143,10 +143,17 @@ export interface MediaPage {
 
 export type MediaKindFilter = "" | "video" | "photo";
 
-// FavoriteSource is one card of the by-source favorites view: a channel or
-// topic the user has favorited media from, with the latest favorite as cover.
-export interface FavoriteSource {
-  source: MediaSource;
+// FavoriteGroupBy is what a grouped favorites view buckets by: the channel or
+// topic an item came from, or the streamer prefix of a video's filename.
+export type FavoriteGroupBy = "source" | "streamer";
+
+// FavoriteGroup is one card of a grouped favorites view. `by` tags it: a
+// source card carries `source` and opens with ?channel_id=<key>; a streamer
+// card opens with ?streamer=<key> ("" = videos without a streamer).
+export interface FavoriteGroup {
+  by: FavoriteGroupBy;
+  key: string;
+  source?: MediaSource;
   videos: number;
   photos: number;
   last_favorited_at: string;

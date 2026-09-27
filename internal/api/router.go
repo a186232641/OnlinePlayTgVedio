@@ -127,7 +127,7 @@ func NewRouter(d Deps) http.Handler {
 
 			r.Route("/favorites", func(r chi.Router) {
 				r.Get("/", favH.List)
-				r.Get("/sources", favH.Sources)
+				r.Get("/groups", favH.Groups)
 				r.Post("/", favH.Add)
 				r.Delete("/photo/{id}", favH.RemovePhoto)
 				r.Delete("/{video_id}", favH.Remove)

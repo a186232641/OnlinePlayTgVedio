@@ -304,10 +304,13 @@ sort (favorite time, or publish date for a date sort; none for name sorts) via
 explicit `order` into the player, and the player assumes `fav_desc` for a `fav` playlist with
 none, so the reversed order for "加载上一页" is never computed from the wrong sort.
 
-**Favorites by source** (`?view=sources`): `GET /favorites/sources` (`FavoriteSources`) groups
-both favorites tables by the item's channel row — for a forum that is the topic — with per-kind
-counts and the latest favorite as cover. Opening a card is the ordinary favorites listing with
-`?channel_id=`, which the player's `fav` playlist and "返回收藏" carry along.
+**Grouped favorites** (`?group=source|streamer`): `GET /favorites/groups?by=` (`FavoriteGroups`)
+buckets both favorites tables and tags each card with `by` + `key`. `source` groups by the item's
+channel row — for a forum that is the topic — and a card opens as the ordinary favorites listing
+with `?channel_id=<key>`; `streamer` groups by `videos.streamer` across channels (videos only, `""`
+= the "其它" bucket) and opens with `?streamer=<key>`. The player's `fav` playlist and "返回收藏"
+carry both filters along. A new grouping is a new `by` value: a key expression in
+`FavoriteGroups`, the matching list filter, and a tab.
 
 `channels.video_count` / `photo_count` are what the list endpoints report as totals, not a live
 `COUNT(*)`: on a million-row channel counting twice per first page costs hundreds of milliseconds

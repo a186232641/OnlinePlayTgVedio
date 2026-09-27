@@ -2,17 +2,17 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
-import { api, ApiError, FavoriteSource, MediaItem, MediaKindFilter, MediaSource } from "../api/client";
+import { api, ApiError, FavoriteGroup, FavoriteGroupBy, MediaItem, MediaKindFilter, MediaSource } from "../api/client";
 import { MEDIA_PAGE_SIZE, normalizeKind, useMediaPages } from "../api/media";
 import { KindTabs, MediaBrowser } from "../components/MediaBrowser";
 import { SortSelect, SortValue, normalizeSort, FAV_DEFAULT_SORT, FAV_SORT_OPTIONS } from "../components/SortSelect";
-import { ChevronLeftIcon, GridIcon, ImageIcon, PlayIcon, TopicsIcon } from "../components/icons";
+import { ChevronLeftIcon, GridIcon, ImageIcon, PlayIcon, TopicsIcon, UsersIcon } from "../components/icons";
 import { AlertStrip, EmptyState, LoadingState, MoreFooter, PageHeader, cx } from "../components/ui";
 
-// View is how the favorites page is laid out: every item, or one card per
-// channel/topic the items came from ("sources"). Opening a card is the item
-// view scoped by channelId.
-type View = "" | "sources";
+// The favorites page shows either every item or one card per group (`group`,
+// the server's ?by=). Opening a card is the item view scoped by that group's
+// filter: channelId for a source, streamer for a streamer.
+type GroupView = "" | FavoriteGroupBy;
 
 interface Filters {
   fileName: string;
@@ -20,8 +20,16 @@ interface Filters {
   dateTo: string;
   order: SortValue;
   kind: MediaKindFilter;
-  view: View;
+  group: GroupView;
   channelId: string; // one source's favorites; "" = all
+  streamer: string | null; // one streamer's favorites ("" = no streamer); null = all
+}
+
+// drillOf names the grouping an item view was opened from, if any.
+function drillOf(f: Filters): FavoriteGroupBy | null {
+  if (f.channelId) return "source";
+  if (f.streamer !== null) return "streamer";
+  return null;
 }
 
 // URL is the source of truth so returning from a video restores the filtered,
@@ -33,9 +41,15 @@ function filtersFromParams(p: URLSearchParams): Filters {
     dateTo: p.get("date_to") ?? "",
     order: normalizeSort(p.get("order"), FAV_SORT_OPTIONS, FAV_DEFAULT_SORT),
     kind: normalizeKind(p.get("kind")),
-    // A source drill-down is an item view, whatever ?view says.
-    view: p.get("view") === "sources" && !p.get("channel_id") ? "sources" : "",
+    // A drill-down is an item view, whatever ?group says.
+    group:
+      p.has("channel_id") || p.has("streamer")
+        ? ""
+        : p.get("group") === "source" || p.get("group") === "streamer"
+          ? (p.get("group") as FavoriteGroupBy)
+          : "",
     channelId: p.get("channel_id") ?? "",
+    streamer: p.has("streamer") ? (p.get("streamer") ?? "") : null,
   };
 }
 
@@ -46,8 +60,9 @@ function paramsFromFilters(f: Filters): URLSearchParams {
   if (f.dateTo) p.set("date_to", f.dateTo);
   if (f.order !== FAV_DEFAULT_SORT) p.set("order", f.order);
   if (f.kind) p.set("kind", f.kind);
-  if (f.view) p.set("view", f.view);
+  if (f.group) p.set("group", f.group);
   if (f.channelId) p.set("channel_id", f.channelId);
+  if (f.streamer !== null) p.set("streamer", f.streamer);
   return p;
 }
 
@@ -82,11 +97,12 @@ export function Favorites() {
   const [draft, setDraft] = useState<Filters>(submitted);
   useEffect(() => { setDraft(submitted); }, [searchParams]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const bySource = submitted.view === "sources";
+  const grouped = submitted.group !== "";
+  const drill = drillOf(submitted);
   const { query: q, items, sources } = useMediaPages(
     ["favorites", submitted],
     () => paramsFromFilters(submitted),
-    { path: "/api/favorites/", enabled: !bySource },
+    { path: "/api/favorites/", enabled: !grouped },
   );
 
   const filtered = !!(submitted.fileName || submitted.dateFrom || submitted.dateTo);
@@ -95,35 +111,57 @@ export function Favorites() {
   const patch = (next: Partial<Filters>) =>
     setSearchParams(paramsFromFilters({ ...submitted, ...next }));
 
-  const viewTabs = (
-    <ViewTabs
-      value={submitted.view}
-      onChange={(view) => patch({ view, channelId: "" })}
+  const groupTabs = (
+    <GroupTabs
+      value={submitted.group}
+      onChange={(group) => patch({ group, channelId: "", streamer: null })}
     />
   );
 
-  if (bySource) {
+  if (grouped) {
+    const by = submitted.group as FavoriteGroupBy;
     return (
       <div className="space-y-5 p-4 md:p-6">
         <PageHeader
           title="收藏"
-          meta="按话题 / 频道归类 — 同一话题收藏的视频和图片合并成一张卡片"
-          actions={viewTabs}
+          meta={
+            by === "source"
+              ? "按话题 / 频道归类 — 同一话题收藏的视频和图片合并成一张卡片"
+              : "按主播归类 — 取视频文件名「主播名-日期」的前缀,跨频道合并;不符合命名的归入「其它」"
+          }
+          actions={groupTabs}
         />
-        <div className="flex flex-wrap items-center gap-2">
-          <KindTabs value={submitted.kind} onChange={(kind) => patch({ kind })} />
-        </div>
-        <SourceCards
-          kind={submitted.kind}
-          linkTo={(id) => `/favorites?${paramsFromFilters({ ...submitted, view: "", channelId: String(id) })}`}
+        {/* Streamers are a videos-only notion, so the kind switch means nothing there. */}
+        {by === "source" && (
+          <div className="flex flex-wrap items-center gap-2">
+            <KindTabs value={submitted.kind} onChange={(kind) => patch({ kind })} />
+          </div>
+        )}
+        <GroupCards
+          by={by}
+          kind={by === "source" ? submitted.kind : ""}
+          linkTo={(g) =>
+            `/favorites?${paramsFromFilters({
+              ...submitted,
+              group: "",
+              channelId: g.by === "source" ? g.key : "",
+              streamer: g.by === "streamer" ? g.key : null,
+            })}`
+          }
         />
       </div>
     );
   }
 
-  // In a drill-down the page's own items name the source; fall back to the id
-  // until the first page lands.
+  // In a source drill-down the page's own items name the source; fall back to
+  // the id until the first page lands.
   const src: MediaSource | undefined = submitted.channelId ? sources[submitted.channelId] : undefined;
+  const drillTitle =
+    drill === "source"
+      ? src ? sourceTitle(src) : `#${submitted.channelId}`
+      : drill === "streamer"
+        ? streamerTitle(submitted.streamer ?? "")
+        : null;
 
   if (q.error) {
     const err = q.error as ApiError;
@@ -150,31 +188,32 @@ export function Favorites() {
     p.set("order", submitted.order);
     // Not used by the playlist (always videos) — carried so "返回收藏" restores the tab.
     if (submitted.kind) p.set("kind", submitted.kind);
-    // Scopes the playlist to the opened source, and "返回收藏" back to it.
+    // Scopes the playlist to the opened group, and "返回收藏" back to it.
     if (submitted.channelId) p.set("channel_id", submitted.channelId);
+    if (submitted.streamer !== null) p.set("streamer", submitted.streamer);
     return `/videos/${m.id}?${p}`;
   };
 
   return (
     <div className="space-y-5 p-4 md:p-6">
-      {submitted.channelId && (
+      {drill && (
         <Link
-          to={`/favorites?${paramsFromFilters({ ...submitted, view: "sources", channelId: "" })}`}
+          to={`/favorites?${paramsFromFilters({ ...submitted, group: drill, channelId: "", streamer: null })}`}
           className="inline-flex items-center gap-1 text-theme-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
         >
           <ChevronLeftIcon className="size-4" />
-          返回按话题
+          {drill === "source" ? "返回按话题" : "返回按主播"}
         </Link>
       )}
       <PageHeader
-        title={submitted.channelId ? <>收藏 · {src ? sourceTitle(src) : `#${submitted.channelId}`}</> : "收藏"}
+        title={drillTitle ? <>收藏 · {drillTitle}</> : "收藏"}
         actions={
-          submitted.channelId ? (
+          drill === "source" ? (
             <Link to={`/channels/${submitted.channelId}`} className="btn btn-outline btn-sm">
               打开{src?.dialog_kind === "topic" ? "话题" : "频道"}
             </Link>
-          ) : (
-            viewTabs
+          ) : drill ? null : (
+            groupTabs
           )
         }
         meta={
@@ -232,15 +271,18 @@ export function Favorites() {
                     dateTo: "",
                     order: submitted.order,
                     kind: submitted.kind,
-                    view: submitted.view,
+                    group: submitted.group,
                     channelId: submitted.channelId,
+                    streamer: submitted.streamer,
                   }),
                 )
               }
               className="btn btn-outline"
             >清空</button>
           )}
-          <KindTabs value={submitted.kind} onChange={(kind) => patch({ kind })} />
+          {drill !== "streamer" && (
+            <KindTabs value={submitted.kind} onChange={(kind) => patch({ kind })} />
+          )}
           <SortSelect
             value={submitted.order}
             onChange={(order) => patch({ order })}
@@ -257,7 +299,7 @@ export function Favorites() {
         loadingMore={q.isFetchingNextPage}
         onLoadMore={q.fetchNextPage}
         linkTo={linkTo}
-        sources={submitted.channelId ? undefined : sources}
+        sources={drill === "source" ? undefined : sources}
         groupBy={groupBy}
         emptyLabel={filtered ? "无匹配收藏" : "暂无收藏 — 播放页或图片查看器里点「收藏」即可加入"}
       />
@@ -278,15 +320,21 @@ function sourceTitle(s: MediaSource): string {
   return s.dialog_kind === "topic" && s.parent_title ? `${s.parent_title} › ${s.title}` : s.title;
 }
 
-const VIEWS: { value: View; label: string; Icon: typeof GridIcon }[] = [
+// "" is the bucket of videos whose filename carries no streamer prefix.
+function streamerTitle(name: string): string {
+  return name || "其它";
+}
+
+const GROUP_TABS: { value: GroupView; label: string; Icon: typeof GridIcon }[] = [
   { value: "", label: "全部收藏", Icon: GridIcon },
-  { value: "sources", label: "按话题", Icon: TopicsIcon },
+  { value: "source", label: "按话题", Icon: TopicsIcon },
+  { value: "streamer", label: "按主播", Icon: UsersIcon },
 ];
 
-function ViewTabs({ value, onChange }: { value: View; onChange: (v: View) => void }) {
+function GroupTabs({ value, onChange }: { value: GroupView; onChange: (v: GroupView) => void }) {
   return (
     <div className="inline-flex rounded-xl bg-gray-100 p-1 dark:bg-white/[0.06]">
-      {VIEWS.map(({ value: v, label, Icon }) => (
+      {GROUP_TABS.map(({ value: v, label, Icon }) => (
         <button
           key={v || "all"}
           type="button"
@@ -306,7 +354,7 @@ function ViewTabs({ value, onChange }: { value: View; onChange: (v: View) => voi
   );
 }
 
-function Cover({ g }: { g: FavoriteSource }) {
+function Cover({ g }: { g: FavoriteGroup }) {
   const [failed, setFailed] = useState(false);
   if (failed) {
     return (
@@ -327,12 +375,25 @@ function Cover({ g }: { g: FavoriteSource }) {
   );
 }
 
-// SourceCards is the by-source favorites view: one card per channel or topic,
-// newest-favorited first, each opening that source's favorites.
-function SourceCards({ kind, linkTo }: { kind: MediaKindFilter; linkTo: (channelId: number) => string }) {
-  const q = useQuery<{ items: FavoriteSource[] }>({
-    queryKey: ["favorites", "sources", kind],
-    queryFn: () => api.get(`/api/favorites/sources${kind ? `?kind=${kind}` : ""}`),
+// GroupCards is a grouped favorites view: one card per group, newest-favorited
+// first, each opening that group's favorites. `g.by` decides how a card is
+// titled; linkTo decides which filter opens it.
+function GroupCards({
+  by,
+  kind,
+  linkTo,
+}: {
+  by: FavoriteGroupBy;
+  kind: MediaKindFilter;
+  linkTo: (g: FavoriteGroup) => string;
+}) {
+  const q = useQuery<{ items: FavoriteGroup[] }>({
+    queryKey: ["favorites", "groups", by, kind],
+    queryFn: () => {
+      const qs = new URLSearchParams({ by });
+      if (kind) qs.set("kind", kind);
+      return api.get(`/api/favorites/groups?${qs}`);
+    },
   });
 
   if (q.error) {
@@ -341,17 +402,19 @@ function SourceCards({ kind, linkTo }: { kind: MediaKindFilter; linkTo: (channel
   }
   if (q.isLoading) return <LoadingState />;
   const groups = q.data?.items ?? [];
-  if (groups.length === 0) return <EmptyState title="暂无收藏" />;
+  if (groups.length === 0) {
+    return <EmptyState title={by === "streamer" ? "暂无收藏的视频" : "暂无收藏"} />;
+  }
 
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5 3xl:grid-cols-6">
       {groups.map((g) => {
         const s = g.source;
-        const isTopic = s.dialog_kind === "topic";
+        const isTopic = s?.dialog_kind === "topic";
         return (
           <Link
-            key={s.id}
-            to={linkTo(s.id)}
+            key={`${g.by}:${g.key}`}
+            to={linkTo(g)}
             className="card group flex flex-col overflow-hidden p-0 transition-colors hover:border-brand-300 dark:hover:border-brand-500/40"
           >
             <div className="relative aspect-[4/3] w-full overflow-hidden rounded-t-2xl">
@@ -361,14 +424,15 @@ function SourceCards({ kind, linkTo }: { kind: MediaKindFilter; linkTo: (channel
               </span>
             </div>
             <div className="flex min-w-0 flex-1 flex-col gap-1 p-3">
-              {isTopic && s.parent_title && (
+              {isTopic && s?.parent_title && (
                 <div className="truncate text-theme-xs text-gray-400" title={s.parent_title}>
                   {s.parent_title}
                 </div>
               )}
               <div className="line-clamp-2 break-all text-theme-sm font-medium leading-snug text-gray-800 transition-colors group-hover:text-brand-600 dark:text-white/90 dark:group-hover:text-brand-400">
                 {isTopic && <TopicsIcon className="mr-1 inline size-3.5 align-[-2px] text-gray-400" />}
-                {s.title}
+                {g.by === "streamer" && <UsersIcon className="mr-1 inline size-3.5 align-[-2px] text-gray-400" />}
+                {s ? s.title : streamerTitle(g.key)}
               </div>
               <div className="mt-auto flex flex-wrap items-center gap-x-2 text-theme-xs text-gray-500 dark:text-gray-400">
                 {g.videos > 0 && <span>{g.videos.toLocaleString()} 视频</span>}

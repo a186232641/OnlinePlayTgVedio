@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -384,16 +385,16 @@ func TestIntegration(t *testing.T) {
 			}
 		}
 	}
-	// --- favorites grouped by source ---------------------------------------
-	// Every favorite above sits in the topic: one group, both kinds counted,
-	// the cover is a row carrying the latest favorite time.
-	groups, err := d.FavoriteSources(ctx, uid, "")
+	// --- favorites grouped ------------------------------------------------
+	// Every favorite above sits in the topic: one source group, both kinds
+	// counted, the cover is a row carrying the latest favorite time.
+	groups, err := d.FavoriteGroups(ctx, uid, FavGroupBySource, "")
 	if err != nil {
-		t.Fatal("FavoriteSources:", err)
+		t.Fatal("FavoriteGroups(source):", err)
 	}
-	if len(groups) != 1 || groups[0].ChannelID != topicID ||
+	if len(groups) != 1 || groups[0].Key != strconv.FormatInt(topicID, 10) ||
 		groups[0].Videos != int64(len(vids)) || groups[0].Photos != int64(len(phs)) {
-		t.Fatalf("FavoriteSources = %+v (want topic %d, %d videos, %d photos)", groups, topicID, len(vids), len(phs))
+		t.Fatalf("FavoriteGroups(source) = %+v (want topic %d, %d videos, %d photos)", groups, topicID, len(vids), len(phs))
 	}
 	var coverAt time.Time
 	for _, f := range favs {
@@ -405,13 +406,26 @@ func TestIntegration(t *testing.T) {
 		t.Fatalf("cover %s#%d favorited at %v, group last at %v",
 			groups[0].CoverKind, groups[0].CoverID, coverAt, groups[0].LastFavoritedAt)
 	}
-	if vs, err := d.FavoriteSources(ctx, uid, MediaKindVideo); err != nil || len(vs) != 1 || vs[0].Photos != 0 || vs[0].CoverKind != MediaKindVideo {
-		t.Fatalf("FavoriteSources(video) = %+v, %v", vs, err)
+	if vs, err := d.FavoriteGroups(ctx, uid, FavGroupBySource, MediaKindVideo); err != nil || len(vs) != 1 || vs[0].Photos != 0 || vs[0].CoverKind != MediaKindVideo {
+		t.Fatalf("FavoriteGroups(source, video) = %+v, %v", vs, err)
 	}
-	// Opening a group is the favorites listing scoped to that channel row.
+	// By streamer: the topic's videos are all "anchor-…"; images never count.
+	if ss, err := d.FavoriteGroups(ctx, uid, FavGroupByStreamer, ""); err != nil || len(ss) != 1 ||
+		ss[0].Key != "anchor" || ss[0].Videos != int64(len(vids)) || ss[0].Photos != 0 {
+		t.Fatalf("FavoriteGroups(streamer) = %+v, %v", ss, err)
+	}
+	if _, err := d.FavoriteGroups(ctx, uid, "nope", ""); err == nil {
+		t.Fatal("FavoriteGroups with an unknown grouping should fail")
+	}
+	// Opening a group is the favorites listing scoped to that channel row /
+	// that streamer.
 	items, _, _, err = d.ListMedia(ctx, ListMediaOpts{UserID: uid, FavOnly: true, ChannelID: topicID, Limit: 500})
 	if err != nil || len(items) != len(favs) {
 		t.Fatalf("favorites in topic = %d rows, %v (want %d)", len(items), err, len(favs))
+	}
+	items, _, _, err = d.ListMedia(ctx, ListMediaOpts{UserID: uid, FavOnly: true, StreamerFilter: true, Streamer: "anchor", Limit: 500})
+	if err != nil || len(items) != len(vids) {
+		t.Fatalf("favorites of streamer = %d rows, %v (want %d)", len(items), err, len(vids))
 	}
 
 	// A favorite order outside a favorites listing is ignored, not an SQL error.
