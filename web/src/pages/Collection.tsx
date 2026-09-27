@@ -1,13 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
-import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { api, ApiError, Collection as CollectionT, MediaItem } from "../api/client";
 import { MEDIA_PAGE_SIZE, normalizeKind, useMediaPages } from "../api/media";
 import { KindTabs, MediaBrowser } from "../components/MediaBrowser";
 import { COLLECTION_SORT_OPTIONS, FAV_DEFAULT_SORT, SortSelect, normalizeSort } from "../components/SortSelect";
-import { ChevronLeftIcon, PencilIcon, TrashIcon } from "../components/icons";
-import { AlertStrip, LoadingState, MoreFooter, PageHeader } from "../components/ui";
+import { PencilIcon, TrashIcon } from "../components/icons";
+import { AlertStrip, BackBar, LoadingState, MoreFooter, PageHeader } from "../components/ui";
 import { groupFor } from "../dates";
 
 // Collection is one of the user's own groups: its videos and images, newest
@@ -81,13 +81,7 @@ export function Collection() {
 
   return (
     <div className="space-y-5 p-4 md:p-6">
-      <Link
-        to="/favorites?group=collection"
-        className="inline-flex items-center gap-1 text-theme-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-      >
-        <ChevronLeftIcon className="size-4" />
-        我的分组
-      </Link>
+      <BackBar to="/favorites?group=collection">我的分组</BackBar>
 
       <PageHeader
         title={c.name}

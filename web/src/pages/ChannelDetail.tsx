@@ -8,7 +8,7 @@ import { LIST_PAGE_SIZE, useDebounced, usePagedList, useSyncStatuses } from "../
 import { KindTabs, MediaBrowser } from "../components/MediaBrowser";
 import { SortSelect, DEFAULT_SORT, normalizeSort } from "../components/SortSelect";
 import { ChevronLeftIcon, ChevronRightIcon, RefreshIcon, SearchIcon, TopicsIcon, TrashIcon } from "../components/icons";
-import { AlertStrip, EmptyState, LoadingState, MoreFooter, PageHeader, Toggle } from "../components/ui";
+import { AlertStrip, BackBar, EmptyState, LoadingState, MoreFooter, PageHeader, Toggle } from "../components/ui";
 
 interface ChannelResp { channel: Channel }
 interface StreamersResp { streamers: Streamer[]; has_more?: boolean; total?: number }
@@ -62,13 +62,7 @@ export function ChannelDetail() {
   return (
     <div className="space-y-5 p-4 md:p-6">
       {isTopic && channel?.parent_channel_id && (
-        <Link
-          to={`/channels/${channel.parent_channel_id}`}
-          className="inline-flex items-center gap-1 text-theme-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-        >
-          <ChevronLeftIcon className="size-4" />
-          返回话题列表
-        </Link>
+        <BackBar to={`/channels/${channel.parent_channel_id}`}>返回话题列表</BackBar>
       )}
 
       <PageHeader

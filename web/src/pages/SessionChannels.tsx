@@ -1,11 +1,11 @@
-import { Link, useParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useRef, useState } from "react";
 
 import { api, Channel, SyncState } from "../api/client";
 import { LIST_PAGE_SIZE, useDebounced, usePagedList, useSyncStatuses } from "../api/paged";
-import { ChevronLeftIcon, RefreshIcon, SearchIcon, TrashIcon, UploadIcon } from "../components/icons";
-import { AlertStrip, LoadingState, MoreFooter, PageHeader, Toggle } from "../components/ui";
+import { RefreshIcon, SearchIcon, TrashIcon, UploadIcon } from "../components/icons";
+import { AlertStrip, BackBar, LoadingState, MoreFooter, PageHeader, Toggle } from "../components/ui";
 
 interface ImportResp {
   ok: boolean;
@@ -106,13 +106,7 @@ export function SessionChannels() {
 
   return (
     <div className="mx-auto w-full max-w-[1100px] space-y-5 p-4 md:p-6">
-      <Link
-        to="/tg/accounts"
-        className="inline-flex items-center gap-1 text-theme-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-      >
-        <ChevronLeftIcon className="size-4" />
-        返回 TG 账号
-      </Link>
+      <BackBar to="/tg/accounts">返回 TG 账号</BackBar>
 
       <PageHeader title="导入频道视频" meta={`该账号下发现 ${(total ?? list.length).toLocaleString()} 个频道`} />
 
