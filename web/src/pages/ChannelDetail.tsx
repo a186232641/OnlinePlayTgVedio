@@ -8,6 +8,7 @@ import { LIST_PAGE_SIZE, useDebounced, usePagedList, useSyncStatuses } from "../
 import { KindTabs, MediaBrowser } from "../components/MediaBrowser";
 import { SortSelect, DEFAULT_SORT, normalizeSort } from "../components/SortSelect";
 import { ChevronLeftIcon, ChevronRightIcon, RefreshIcon, SearchIcon, TopicsIcon, TrashIcon } from "../components/icons";
+import { SelectToggle, SelectionBar, useMediaSelection } from "../components/SelectionBar";
 import { AlertStrip, BackBar, EmptyState, LoadingState, MoreFooter, PageHeader, Toggle } from "../components/ui";
 
 interface ChannelResp { channel: Channel }
@@ -397,6 +398,7 @@ function MediaView({ id, channel }: { id: string; channel?: Channel }) {
   const setOrder = (v: string) => patch({ order: v });
   const setKind = (v: MediaKindFilter) => patch({ kind: v });
 
+  const sel = useMediaSelection();
   const { query: q, items, totalVideos, totalPhotos } = useMediaPages(
     ["channel", id, "media", query, order, kind],
     () => {
@@ -467,6 +469,7 @@ function MediaView({ id, channel }: { id: string; channel?: Channel }) {
           onChange={setKind}
           counts={{ videos: totalVideos, photos: totalPhotos }}
         />
+        <SelectToggle sel={sel} />
       </form>
 
       <div className="text-theme-xs text-gray-500 dark:text-gray-400">
@@ -507,6 +510,8 @@ function MediaView({ id, channel }: { id: string; channel?: Channel }) {
           hasMore={!!q.hasNextPage}
           loadingMore={q.isFetchingNextPage}
           onLoadMore={q.fetchNextPage}
+          selection={sel.selection}
+          onSelectMany={sel.selectMany}
           emptyLabel={query ? "无匹配结果" : "暂无内容"}
         />
       )}
@@ -519,6 +524,8 @@ function MediaView({ id, channel }: { id: string; channel?: Channel }) {
         loaded={items.length}
         pageSize={MEDIA_PAGE_SIZE}
       />
+
+      <SelectionBar sel={sel} items={items} />
     </div>
   );
 }
@@ -602,6 +609,7 @@ function StreamerVideos({ id, streamer, onBack }: { id: string; streamer: string
     setSearchParams(p, { replace: true });
   };
 
+  const sel = useMediaSelection();
   const { query: q, items } = useMediaPages(
     ["channel", id, "streamer-media", streamer, order],
     () => {
@@ -624,11 +632,14 @@ function StreamerVideos({ id, streamer, onBack }: { id: string; streamer: string
         </span>
         <span className="text-theme-xs text-gray-500 dark:text-gray-400">已加载 {items.length}</span>
         <SortSelect value={order} onChange={setOrder} className="field field-select ml-auto w-auto" />
+        <SelectToggle sel={sel} className="btn-sm" />
       </div>
 
       <MediaBrowser
         items={items}
         isLoading={q.isLoading}
+        selection={sel.selection}
+        onSelectMany={sel.selectMany}
         emptyLabel="该主播暂无视频"
         linkTo={(m) => {
           const params = new URLSearchParams();
@@ -647,6 +658,8 @@ function StreamerVideos({ id, streamer, onBack }: { id: string; streamer: string
         loaded={items.length}
         pageSize={MEDIA_PAGE_SIZE}
       />
+
+      <SelectionBar sel={sel} items={items} />
     </div>
   );
 }

@@ -343,8 +343,10 @@ Routes: `/collections/` (+ `?kind=&id=` adds `contains` for the picker), `/{id}`
 `/{id}/items`, `/{id}/items/{kind}/{item_id}`. UI: a "我的分组" tab on the favorites page
 (`group=collection`), the `/collections/:id` page, and `CollectionPicker` ("加入分组") in the
 player and the image viewer; the player's `?coll=` playlist mirrors `?fav=`. `POST /{id}/items` also takes
-`{"items":[…]}` — the favorites page's "多选" mode (`MediaBrowser`/`MediaGrid` `selection`) adds a
-whole selection at once; ownership of the media is checked inside the INSERT, so foreign or
+`{"items":[…]}` — "多选" mode adds a whole selection at once. Multi-select is
+`components/SelectionBar.tsx` (`useMediaSelection` + `SelectToggle` + `SelectionBar`, fed into
+`MediaBrowser`'s `selection`/`onSelectMany`), used by the favorites page and the channel/topic media
+and streamer views; the bar must be the section's last child (sticky-bottom). ownership of the media is checked inside the INSERT, so foreign or
 missing ids are skipped and `added` counts only new members.
 
 A page's "返回…" link is a `BackBar`: sticky under the h-16 header, so it survives scrolling a long

@@ -8,9 +8,8 @@ import { KindTabs, MediaBrowser } from "../components/MediaBrowser";
 import { SortSelect, SortValue, normalizeSort, FAV_DEFAULT_SORT, FAV_SORT_OPTIONS } from "../components/SortSelect";
 import { CollectionCards } from "../components/CollectionCards";
 import { Cover } from "../components/Cover";
-import { CheckIcon, FolderIcon, GridIcon, TopicsIcon, UsersIcon } from "../components/icons";
-import { AddToCollectionMenu } from "../components/CollectionPicker";
-import { Selection, mediaKey } from "../components/MediaGrid";
+import { FolderIcon, GridIcon, TopicsIcon, UsersIcon } from "../components/icons";
+import { SelectToggle, SelectionBar, useMediaSelection } from "../components/SelectionBar";
 import { dayLabel, groupFor } from "../dates";
 import { AlertStrip, BackBar, EmptyState, LoadingState, MoreFooter, PageHeader, cx } from "../components/ui";
 
@@ -92,42 +91,8 @@ export function Favorites() {
   const filtered = !!(submitted.fileName || submitted.dateFrom || submitted.dateTo);
   const groupBy = useMemo(() => groupFor(submitted.order), [submitted.order]);
 
-  // Multi-select ("多选"): tiles toggle into `picked` instead of opening, and a
-  // bar at the bottom adds the picks to a collection. Picks survive filter
-  // changes and paging, so one batch can gather from several views.
-  const [selecting, setSelecting] = useState(false);
-  const [picked, setPicked] = useState<Map<string, MediaItem>>(() => new Map());
-  const [notice, setNotice] = useState("");
-  const selection = useMemo<Selection | undefined>(
-    () =>
-      selecting
-        ? {
-            selected: new Set(picked.keys()),
-            toggle: (m) =>
-              setPicked((prev) => {
-                const next = new Map(prev);
-                if (next.has(mediaKey(m))) next.delete(mediaKey(m));
-                else next.set(mediaKey(m), m);
-                return next;
-              }),
-          }
-        : undefined,
-    [selecting, picked],
-  );
-  const selectMany = (list: MediaItem[], on: boolean) =>
-    setPicked((prev) => {
-      const next = new Map(prev);
-      for (const m of list) {
-        if (on) next.set(mediaKey(m), m);
-        else next.delete(mediaKey(m));
-      }
-      return next;
-    });
-  const endSelecting = () => {
-    setSelecting(false);
-    setPicked(new Map());
-    setNotice("");
-  };
+  // Multi-select ("多选") — picks can be gathered across filter changes.
+  const sel = useMediaSelection();
 
   const patch = (next: Partial<Filters>) =>
     setSearchParams(paramsFromFilters({ ...submitted, ...next }));
@@ -319,19 +284,7 @@ export function Favorites() {
             options={FAV_SORT_OPTIONS}
             className="field field-select ml-auto w-auto"
           />
-          <button
-            type="button"
-            onClick={() => (selecting ? endSelecting() : setSelecting(true))}
-            className={cx(
-              "btn",
-              selecting
-                ? "bg-brand-50 text-brand-500 ring-1 ring-inset ring-brand-200 hover:bg-brand-100 dark:bg-brand-500/[0.12] dark:text-brand-400 dark:ring-brand-500/30"
-                : "btn-outline",
-            )}
-          >
-            <CheckIcon className="size-4" />
-            {selecting ? "退出多选" : "多选"}
-          </button>
+          <SelectToggle sel={sel} />
         </div>
       </form>
 
@@ -344,8 +297,8 @@ export function Favorites() {
         linkTo={linkTo}
         sources={drill === "source" ? undefined : sources}
         groupBy={groupBy}
-        selection={selection}
-        onSelectMany={selectMany}
+        selection={sel.selection}
+        onSelectMany={sel.selectMany}
         emptyLabel={filtered ? "无匹配收藏" : "暂无收藏 — 播放页或图片查看器里点「收藏」即可加入"}
       />
 
@@ -358,42 +311,7 @@ export function Favorites() {
         pageSize={MEDIA_PAGE_SIZE}
       />
 
-      {/* Last child on purpose: sticky-bottom keeps it on screen while the
-          list above scrolls, and parks it after the footer at the end. */}
-      {selecting && (
-        <div className="card sticky bottom-4 z-20 flex flex-wrap items-center gap-2 p-3 shadow-theme-lg">
-          <span className="text-theme-sm font-medium text-gray-800 dark:text-white/90">
-            已选 <span className="tabular-nums">{picked.size}</span> 项
-          </span>
-          {notice && <span className="text-theme-xs text-success-600 dark:text-success-500">{notice}</span>}
-          <div className="ml-auto flex flex-wrap items-center gap-2">
-            <button type="button" className="btn btn-outline btn-sm" onClick={() => selectMany(items, true)}>
-              全选已加载
-            </button>
-            <button
-              type="button"
-              className="btn btn-outline btn-sm"
-              disabled={picked.size === 0}
-              onClick={() => {
-                setPicked(new Map());
-                setNotice("");
-              }}
-            >
-              清空选择
-            </button>
-            <AddToCollectionMenu
-              items={[...picked.values()]}
-              onAdded={(name, added) => {
-                setPicked(new Map());
-                setNotice(`已加入「${name}」,新增 ${added} 项`);
-              }}
-            />
-            <button type="button" className="btn btn-ghost btn-sm" onClick={endSelecting}>
-              完成
-            </button>
-          </div>
-        </div>
-      )}
+      <SelectionBar sel={sel} items={items} />
     </div>
   );
 }
